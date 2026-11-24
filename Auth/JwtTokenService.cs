@@ -4,7 +4,7 @@ using System.Text;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
-namespace PersonalFinance.Api.Auth;
+namespace PersonalControl.Api.Auth;
 
 public class JwtTokenService(IOptions<JwtOptions> options)
 {

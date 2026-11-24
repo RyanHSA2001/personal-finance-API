@@ -2,7 +2,8 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
-using PersonalFinance.Api.Auth;
+using PersonalControl.Api.Auth;
+using PersonalControl.Api.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,7 +18,9 @@ var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOp
 if (string.IsNullOrWhiteSpace(jwt.Key) || jwt.Key.Length < 32)
     throw new InvalidOperationException("Jwt:Key precisa ser configurada com pelo menos 32 caracteres.");
 
-builder.Services.AddSingleton<IUserStore, InMemoryUserStore>();
+// Acesso a dados: Mock (padrão) ou PostgreSql, conforme "Database:Provider"
+builder.Services.AddDataAccess(builder.Configuration, builder.Environment);
+
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();
 
@@ -46,12 +49,6 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
-
-    // Usuário de teste, criado somente em Development.
-    var store = app.Services.GetRequiredService<IUserStore>();
-    var hasher = app.Services.GetRequiredService<IPasswordHasher<User>>();
-    var demo = new User(Guid.NewGuid(), "demo@teste.com", "Usuário Demo", string.Empty);
-    store.Add(demo with { PasswordHash = hasher.HashPassword(demo, "Senha@123") });
 }
 
 app.UseHttpsRedirection();
@@ -61,28 +58,4 @@ app.UseAuthorization();
 
 app.MapAuthEndpoints();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
-
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
