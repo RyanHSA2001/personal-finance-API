@@ -59,3 +59,37 @@ public record DashboardDto(
     IReadOnlyList<MonthTrendDto> MonthlyTrend,
     IReadOnlyList<BudgetDto> Budgets,
     IReadOnlyList<TransactionDto> RecentTransactions);
+
+// ---------- Importação OFX ----------
+
+// Lançamento lido do OFX. AmountCents é sempre positivo; Type indica entrada (income) ou saída (expense).
+// AlreadyImported fica true quando o ExternalId já existe na conta escolhida.
+public record OfxPreviewTransactionDto(
+    string ExternalId,
+    string Type,
+    long AmountCents,
+    string Description,
+    string OccurredOn,
+    string OfxType,
+    bool AlreadyImported);
+
+public record OfxPreviewDto(
+    string? BankId,
+    string? AccountNumber,
+    string? Currency,
+    string? StartDate,
+    string? EndDate,
+    long? LedgerBalanceCents,
+    IReadOnlyList<OfxPreviewTransactionDto> Transactions);
+
+public record OfxImportItem(
+    string ExternalId,
+    string Type,
+    long AmountCents,
+    string? Description,
+    string OccurredOn,
+    Guid? CategoryId);
+
+public record OfxImportRequest(Guid AccountId, IReadOnlyList<OfxImportItem> Transactions);
+
+public record OfxImportResultDto(int Imported, int Skipped);

@@ -13,13 +13,14 @@ public static class FinanceEndpoints
     private static readonly Regex ColorPattern = new(@"^#[0-9a-fA-F]{6}$");
     private static readonly Regex MonthPattern = new(@"^\d{4}-(0[1-9]|1[0-2])$");
 
-    private const long MaxAmountCents = 1_000_000_000_000; // R$ 10 bilhões
+    internal const long MaxAmountCents = 1_000_000_000_000; // R$ 10 bilhões
 
     public static IEndpointRouteBuilder MapFinanceEndpoints(this IEndpointRouteBuilder app)
     {
         MapAccounts(app);
         MapCategories(app);
         MapTransactions(app);
+        OfxImportEndpoints.MapOfxImport(app);
         MapBudgets(app);
         MapDashboard(app);
         return app;

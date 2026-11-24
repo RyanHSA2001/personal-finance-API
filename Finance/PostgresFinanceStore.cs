@@ -276,6 +276,81 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
     public Task<bool> DeleteTransactionAsync(Guid userId, Guid id, CancellationToken ct = default) =>
         DeleteOwnedAsync("transactions", userId, id, ct);
 
+    // ---------- Importação OFX ----------
+
+    public async Task<IReadOnlySet<string>> ListExternalIdsAsync(
+        Guid userId,
+        Guid accountId,
+        IReadOnlyCollection<string> externalIds,
+        CancellationToken ct = default)
+    {
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        if (externalIds.Count == 0)
+            return found;
+
+        await using var command = dataSource.CreateCommand("""
+            SELECT external_id
+            FROM transactions
+            WHERE user_id = @userId AND account_id = @accountId AND external_id = ANY(@ids)
+            """);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("accountId", accountId);
+        command.Parameters.AddWithValue("ids", externalIds.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            found.Add(reader.GetString(0));
+
+        return found;
+    }
+
+    // Grava tudo numa única transação. Lançamentos cujo external_id já existe na conta são ignorados.
+    // Retorna quantos foram efetivamente inseridos.
+    public async Task<int> ImportTransactionsAsync(
+        Guid userId,
+        Guid accountId,
+        IReadOnlyList<OfxImportItem> items,
+        CancellationToken ct = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO transactions
+                (id, user_id, account_id, category_id, type, amount_cents, description, occurred_on, external_id)
+            VALUES
+                (@id, @userId, @accountId, @categoryId, @type, @amount, @description, @occurredOn, @externalId)
+            ON CONFLICT (account_id, external_id) WHERE external_id IS NOT NULL DO NOTHING
+            """, connection, transaction);
+
+        var id = command.Parameters.Add("id", NpgsqlDbType.Uuid);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("accountId", accountId);
+        var categoryId = command.Parameters.Add("categoryId", NpgsqlDbType.Uuid);
+        var type = command.Parameters.Add("type", NpgsqlDbType.Text);
+        var amount = command.Parameters.Add("amount", NpgsqlDbType.Bigint);
+        var description = command.Parameters.Add("description", NpgsqlDbType.Text);
+        var occurredOn = command.Parameters.Add("occurredOn", NpgsqlDbType.Date);
+        var externalId = command.Parameters.Add("externalId", NpgsqlDbType.Text);
+
+        var inserted = 0;
+        foreach (var item in items)
+        {
+            id.Value = Guid.NewGuid();
+            categoryId.Value = (object?)item.CategoryId ?? DBNull.Value;
+            type.Value = item.Type;
+            amount.Value = item.AmountCents;
+            description.Value = item.Description ?? string.Empty;
+            occurredOn.Value = DateOnly.ParseExact(item.OccurredOn, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+            externalId.Value = item.ExternalId;
+
+            inserted += await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return inserted;
+    }
+
     // ---------- Orçamentos ----------
 
     public async Task<IReadOnlyList<BudgetDto>> ListBudgetsAsync(Guid userId, string month, CancellationToken ct = default)

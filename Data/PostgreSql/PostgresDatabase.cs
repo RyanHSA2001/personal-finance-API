@@ -23,6 +23,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 2)
             ApplyMigration2(connection);
+
+        if (currentVersion < 3)
+            ApplyMigration3(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -109,6 +112,23 @@ public static class PostgresDatabase
             CREATE INDEX IF NOT EXISTS idx_budgets_user_id ON budgets (user_id);
 
             INSERT INTO schema_migrations (version) VALUES (2)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Importação OFX: identificador do lançamento no banco (FITID), único por conta, evita duplicar extratos.
+    private static void ApplyMigration3(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            ALTER TABLE transactions ADD COLUMN IF NOT EXISTS external_id TEXT NULL;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_account_external_id
+                ON transactions (account_id, external_id)
+                WHERE external_id IS NOT NULL;
+
+            INSERT INTO schema_migrations (version) VALUES (3)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();

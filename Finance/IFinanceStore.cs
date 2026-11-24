@@ -24,6 +24,18 @@ public interface IFinanceStore
     Task<Guid> AddTransactionAsync(Guid userId, TransactionRequest request, CancellationToken ct = default);
     Task<bool> DeleteTransactionAsync(Guid userId, Guid id, CancellationToken ct = default);
 
+    // Importação OFX: identificadores do banco já gravados na conta e gravação em lote (ignora duplicados).
+    Task<IReadOnlySet<string>> ListExternalIdsAsync(
+        Guid userId,
+        Guid accountId,
+        IReadOnlyCollection<string> externalIds,
+        CancellationToken ct = default);
+    Task<int> ImportTransactionsAsync(
+        Guid userId,
+        Guid accountId,
+        IReadOnlyList<OfxImportItem> items,
+        CancellationToken ct = default);
+
     Task<IReadOnlyList<BudgetDto>> ListBudgetsAsync(Guid userId, string month, CancellationToken ct = default);
     Task UpsertBudgetAsync(Guid userId, BudgetRequest request, CancellationToken ct = default);
     Task<bool> DeleteBudgetAsync(Guid userId, Guid id, CancellationToken ct = default);
