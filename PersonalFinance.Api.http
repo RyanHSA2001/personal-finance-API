@@ -1,0 +1,27 @@
+@PersonalFinance.Api_HostAddress = http://localhost:5168
+
+GET {{PersonalFinance.Api_HostAddress}}/openapi/v1.json
+Accept: application/json
+
+###
+
+GET {{PersonalFinance.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
+
+POST {{PersonalFinance.Api_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "demo@teste.com",
+  "password": "Senha@123"
+}
+
+###
+
+GET {{PersonalFinance.Api_HostAddress}}/auth/me
+Accept: application/json
+Authorization: Bearer COLE_O_TOKEN_AQUI
+
+###

@@ -1,0 +1,13 @@
+# Saída de build
+bin/
+obj/
+
+# Configurações pessoais do Visual Studio
+.vs/
+*.user
+*.suo
+
+# Segredos e configurações locais
+.env
+secrets.json
+appsettings.Production.json
