@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace PersonalFinance.Api.Auth;
+namespace PersonalControl.Api.Auth;
 
 // Armazenamento em memória (some ao reiniciar a API).
 // Para persistir, crie outra implementação de IUserStore (ex.: EF Core / PostgreSQL).

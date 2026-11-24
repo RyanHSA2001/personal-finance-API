@@ -1,7 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Identity;
 
-namespace PersonalFinance.Api.Auth;
+namespace PersonalControl.Api.Auth;
 
 public static class AuthEndpoints
 {

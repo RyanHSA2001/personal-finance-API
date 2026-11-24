@@ -1,4 +1,4 @@
-namespace PersonalFinance.Api.Auth;
+namespace PersonalControl.Api.Auth;
 
 public record LoginRequest(string Email, string Password);
 
