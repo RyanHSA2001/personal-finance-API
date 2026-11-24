@@ -1,25 +1,31 @@
+using Npgsql;
 using PersonalControl.Api.Auth;
-using PersonalControl.Api.Data.Sqlite;
+using PersonalControl.Api.Data.PostgreSql;
 using PersonalControl.Api.Finance;
 
 namespace PersonalControl.Api.Data;
 
 public static class DataAccessExtensions
 {
-    // Registra o acesso a dados em SQLite. Cria o arquivo e aplica as migrações se necessário.
+    // Registra o acesso a dados em PostgreSQL (Npgsql) e aplica as migrações na inicialização.
     public static IServiceCollection AddDataAccess(
         this IServiceCollection services,
-        IConfiguration configuration,
-        IHostEnvironment environment)
+        IConfiguration configuration)
     {
         var options = configuration.GetSection("Database").Get<DatabaseOptions>() ?? new DatabaseOptions();
-        var filePath = Path.GetFullPath(Path.Combine(environment.ContentRootPath, options.Path));
-        var connectionString = SqliteDatabase.BuildConnectionString(filePath);
 
-        SqliteDatabase.Initialize(connectionString);
+        if (string.IsNullOrWhiteSpace(options.ConnectionString))
+        {
+            throw new InvalidOperationException(
+                "Database:ConnectionString precisa ser configurada (appsettings.Development.json ou variável Database__ConnectionString).");
+        }
 
-        services.AddSingleton<IUserStore>(new SqliteUserStore(connectionString));
-        services.AddSingleton(new SqliteFinanceStore(connectionString));
+        var dataSource = NpgsqlDataSource.Create(options.ConnectionString);
+        PostgresDatabase.Initialize(dataSource);
+
+        services.AddSingleton(dataSource);
+        services.AddSingleton<IUserStore, PostgresUserStore>();
+        services.AddSingleton<IFinanceStore, PostgresFinanceStore>();
         return services;
     }
 }

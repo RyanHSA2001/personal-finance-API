@@ -6,12 +6,20 @@ Desenvolvido em ASP.NET Core (.NET 11), com o front em
 
 ## Executar
 
+1. Suba o PostgreSQL local com Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+2. Inicie a API:
+
 ```bash
 dotnet run --launch-profile http
 ```
 
-A API sobe em `http://localhost:5168`. Na primeira execução, o banco SQLite é
-criado automaticamente em `data/personalcontrol.db` (pasta do projeto).
+A API sobe em `http://localhost:5168`. Na primeira execução, as tabelas e índices
+são criados automaticamente no PostgreSQL (migrações versionadas na tabela `schema_migrations`).
 
 ## Endpoints
 
@@ -51,14 +59,16 @@ variável de ambiente (`Jwt__Key`) ou de `dotnet user-secrets` fora do Developme
 
 ## Banco de dados
 
-O acesso a usuários é feito pela interface `IUserStore`, com implementação em
-SQLite (`Data/Sqlite`). O arquivo é definido em `Database:Path`:
+O acesso a dados é feito via **PostgreSQL** (`Npgsql`), pelas interfaces `IUserStore`
+e `IFinanceStore` registradas em `Data/DataAccessExtensions.cs`.
 
-- Caminho relativo: resolvido a partir da pasta do projeto. Padrão: `data/personalcontrol.db`.
-- Caminho absoluto também é aceito (`Database__Path` por variável de ambiente).
+A string de conexão fica em `Database:ConnectionString`:
 
-Ao iniciar, a API cria a pasta, o arquivo e a tabela `users` caso não existam.
-Não é preciso rodar script de criação.
+- **Desenvolvimento**: já configurada em `appsettings.Development.json` apontando para o container do `docker-compose.yml` (`localhost:5432`).
+- **VPS / Produção**: informe por variável de ambiente (`Database__ConnectionString`) ou `dotnet user-secrets`.
+
+Ao iniciar, a API aplica automaticamente as migrações pendentes (`Data/PostgreSql/PostgresDatabase.cs`).
+Não é preciso rodar script manual.
 
 ### Primeiro acesso
 
@@ -74,4 +84,4 @@ desenvolvimento ficam em `appsettings.Development.json`, então o coringa não e
 fora do ambiente Development. Para remover, apague a seção `WildcardAccess` (e o
 método `IsWildcardLogin` em `Auth/AuthEndpoints.cs`) quando o cadastro estiver definitivo.
 
-Não versione o arquivo `data/` nem senhas de produção: ambos já estão no `.gitignore`.
+Não versione segredos ou senhas de produção (`appsettings.Production.json`, `.env` e `secrets.json` já estão no `.gitignore`).

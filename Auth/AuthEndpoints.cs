@@ -59,7 +59,7 @@ public static class AuthEndpoints
         .WithName("SetupStatus")
         .AllowAnonymous();
 
-        // Cadastro do primeiro acesso. Só é aceito enquanto não houver nenhum usuário.
+        // Cadastro de novo usuário. Devolve o token JWT para já entrar logado.
         group.MapPost("/register", async (
             RegisterRequest request,
             IUserStore users,
@@ -74,10 +74,8 @@ public static class AuthEndpoints
             var user = new User(Guid.NewGuid(), request.Email.Trim(), request.Name.Trim(), string.Empty);
             user = user with { PasswordHash = hasher.HashPassword(user, request.Password) };
 
-            if (!await users.TryAddIfEmptyAsync(user, cancellationToken))
-                return Results.Json(
-                    new { error = "Já existe um usuário cadastrado. Faça login para continuar." },
-                    statusCode: StatusCodes.Status403Forbidden);
+            if (!await users.TryAddAsync(user, cancellationToken))
+                return Results.Conflict(new { error = "Já existe uma conta cadastrada com este e-mail." });
 
             return Results.Ok(tokens.CreateToken(user));
         })

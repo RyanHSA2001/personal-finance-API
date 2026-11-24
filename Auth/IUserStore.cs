@@ -9,6 +9,6 @@ public interface IUserStore
     // Indica se já existe algum usuário cadastrado.
     Task<bool> AnyAsync(CancellationToken cancellationToken = default);
 
-    // Grava o usuário somente se ainda não houver nenhum. Retorna false se já existir.
-    Task<bool> TryAddIfEmptyAsync(User user, CancellationToken cancellationToken = default);
+    // Grava o usuário. Retorna false se já existir uma conta com o mesmo e-mail.
+    Task<bool> TryAddAsync(User user, CancellationToken cancellationToken = default);
 }

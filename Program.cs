@@ -22,8 +22,8 @@ if (string.IsNullOrWhiteSpace(jwt.Key) || jwt.Key.Length < 32)
 // Acesso coringa temporário (seção "WildcardAccess")
 builder.Services.Configure<WildcardAccessOptions>(builder.Configuration.GetSection("WildcardAccess"));
 
-// Banco SQLite local: cria o arquivo e a tabela de usuários se ainda não existirem.
-builder.Services.AddDataAccess(builder.Configuration, builder.Environment);
+// Banco PostgreSQL: conecta via Npgsql e aplica as migrações pendentes na inicialização.
+builder.Services.AddDataAccess(builder.Configuration);
 
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();

@@ -2,7 +2,7 @@ using System.Globalization;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text.RegularExpressions;
-using Microsoft.Data.Sqlite;
+using Npgsql;
 
 namespace PersonalControl.Api.Finance;
 
@@ -31,10 +31,10 @@ public static class FinanceEndpoints
     {
         var group = app.MapGroup("/accounts").WithTags("Accounts").RequireAuthorization();
 
-        group.MapGet("", async (ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapGet("", async (ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             Results.Ok(await store.ListAccountsAsync(principal.GetUserId(), ct)));
 
-        group.MapPost("", async (AccountRequest request, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapPost("", async (AccountRequest request, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var error = ValidateName(request.Name, "conta", 80)
                 ?? (AccountKinds.Contains(request.Kind) ? null : "Tipo de conta inválido.")
@@ -46,7 +46,7 @@ public static class FinanceEndpoints
             return Results.Created($"/accounts/{id}", new { id });
         });
 
-        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             await store.DeleteAccountAsync(principal.GetUserId(), id, ct)
                 ? Results.NoContent()
                 : Results.NotFound());
@@ -58,14 +58,14 @@ public static class FinanceEndpoints
     {
         var group = app.MapGroup("/categories").WithTags("Categories").RequireAuthorization();
 
-        group.MapGet("", async (ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapGet("", async (ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var userId = principal.GetUserId();
             await store.EnsureDefaultCategoriesAsync(userId, ct);
             return Results.Ok(await store.ListCategoriesAsync(userId, ct));
         });
 
-        group.MapPost("", async (CategoryRequest request, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapPost("", async (CategoryRequest request, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var color = request.Color ?? "#64748b";
             var error = ValidateName(request.Name, "categoria", 60)
@@ -79,13 +79,13 @@ public static class FinanceEndpoints
                 var id = await store.AddCategoryAsync(principal.GetUserId(), request with { Color = color }, ct);
                 return Results.Created($"/categories/{id}", new { id });
             }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
             {
                 return Results.Conflict(new { error = "Já existe uma categoria com esse nome para este tipo." });
             }
         });
 
-        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             await store.DeleteCategoryAsync(principal.GetUserId(), id, ct)
                 ? Results.NoContent()
                 : Results.NotFound());
@@ -103,7 +103,7 @@ public static class FinanceEndpoints
             Guid? categoryId,
             int? limit,
             ClaimsPrincipal principal,
-            SqliteFinanceStore store,
+            IFinanceStore store,
             CancellationToken ct) =>
         {
             if (month is not null && !MonthPattern.IsMatch(month))
@@ -114,7 +114,7 @@ public static class FinanceEndpoints
             return Results.Ok(result);
         });
 
-        group.MapPost("", async (TransactionRequest request, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapPost("", async (TransactionRequest request, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var userId = principal.GetUserId();
             var error = await ValidateTransactionAsync(request, userId, store, ct);
@@ -129,7 +129,7 @@ public static class FinanceEndpoints
             return Results.Created($"/transactions/{id}", new { id });
         });
 
-        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             await store.DeleteTransactionAsync(principal.GetUserId(), id, ct)
                 ? Results.NoContent()
                 : Results.NotFound());
@@ -138,7 +138,7 @@ public static class FinanceEndpoints
     private static async Task<string?> ValidateTransactionAsync(
         TransactionRequest request,
         Guid userId,
-        SqliteFinanceStore store,
+        IFinanceStore store,
         CancellationToken ct)
     {
         if (!TransactionTypes.Contains(request.Type))
@@ -195,7 +195,7 @@ public static class FinanceEndpoints
     {
         var group = app.MapGroup("/budgets").WithTags("Budgets").RequireAuthorization();
 
-        group.MapGet("", async (string? month, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapGet("", async (string? month, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var resolved = ResolveMonth(month);
             if (resolved is null)
@@ -204,7 +204,7 @@ public static class FinanceEndpoints
             return Results.Ok(await store.ListBudgetsAsync(principal.GetUserId(), resolved, ct));
         });
 
-        group.MapPut("", async (BudgetRequest request, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapPut("", async (BudgetRequest request, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var userId = principal.GetUserId();
 
@@ -222,7 +222,7 @@ public static class FinanceEndpoints
             return Results.NoContent();
         });
 
-        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             await store.DeleteBudgetAsync(principal.GetUserId(), id, ct)
                 ? Results.NoContent()
                 : Results.NotFound());
@@ -232,7 +232,7 @@ public static class FinanceEndpoints
 
     private static void MapDashboard(IEndpointRouteBuilder app)
     {
-        app.MapGet("/dashboard", async (string? month, ClaimsPrincipal principal, SqliteFinanceStore store, CancellationToken ct) =>
+        app.MapGet("/dashboard", async (string? month, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
         {
             var resolved = ResolveMonth(month);
             if (resolved is null)
