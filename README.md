@@ -10,15 +10,36 @@ Desenvolvido em ASP.NET Core (.NET 11), com o front em
 dotnet run --launch-profile http
 ```
 
-A API sobe em `http://localhost:5168`. Em ambiente Development, é criado o
-usuário de teste `demo@teste.com` / `Senha@123`.
+A API sobe em `http://localhost:5168`. Na primeira execução, o banco SQLite é
+criado automaticamente em `data/personalcontrol.db` (pasta do projeto).
 
 ## Endpoints
 
-| Método | Rota          | Descrição                                        |
-|--------|---------------|--------------------------------------------------|
-| POST   | `/auth/login` | Recebe `email` e `password`, retorna `accessToken` |
-| GET    | `/auth/me`    | Dados do usuário logado (exige `Authorization: Bearer`) |
+| Método | Rota             | Descrição                                                                 |
+|--------|------------------|---------------------------------------------------------------------------|
+| GET    | `/auth/setup`    | Retorna `requiresSetup`: `true` se ainda não há nenhum usuário cadastrado |
+| POST   | `/auth/register` | Cadastro do primeiro acesso (`name`, `email`, `password`). Só aceito enquanto não houver usuários; devolve o token |
+| POST   | `/auth/login`    | Recebe `email` e `password`, retorna `accessToken`                        |
+| GET    | `/auth/me`       | Dados do usuário logado (exige `Authorization: Bearer`)                   |
+
+As rotas abaixo exigem `Authorization: Bearer` e só enxergam dados do próprio usuário.
+Valores monetários são em centavos (inteiros).
+
+| Método | Rota                       | Descrição                                                              |
+|--------|----------------------------|------------------------------------------------------------------------|
+| GET    | `/dashboard?month=AAAA-MM` | Saldos, receitas/despesas do mês, gasto por categoria, últimos 6 meses, orçamentos e últimos lançamentos |
+| GET    | `/accounts`                | Contas com saldo atual                                                  |
+| POST   | `/accounts`                | Cria conta (`name`, `kind`, `initialBalanceCents`)                      |
+| DELETE | `/accounts/{id}`           | Exclui a conta e os lançamentos dela                                    |
+| GET    | `/categories`              | Categorias (cria as padrão no primeiro acesso)                          |
+| POST   | `/categories`              | Cria categoria (`name`, `kind` = `income`/`expense`, `color`)           |
+| DELETE | `/categories/{id}`         | Exclui a categoria (os lançamentos ficam sem categoria)                 |
+| GET    | `/transactions?month=&accountId=&categoryId=` | Lançamentos, do mais recente para o mais antigo        |
+| POST   | `/transactions`            | Cria lançamento (`type` = `income`/`expense`/`transfer`, `amountCents`, `occurredOn`, `accountId`, `categoryId`, `transferAccountId`) |
+| DELETE | `/transactions/{id}`       | Exclui o lançamento                                                     |
+| GET    | `/budgets?month=AAAA-MM`   | Orçamentos com o gasto do mês                                           |
+| PUT    | `/budgets`                 | Cria ou atualiza o limite mensal de uma categoria de despesa            |
+| DELETE | `/budgets/{id}`            | Remove o orçamento                                                      |
 
 Documentação OpenAPI disponível em `/openapi/v1.json` (somente Development).
 
@@ -30,24 +51,27 @@ variável de ambiente (`Jwt__Key`) ou de `dotnet user-secrets` fora do Developme
 
 ## Banco de dados
 
-O acesso a usuários é feito pela interface `IUserStore`, e a implementação é
-escolhida em `Database:Provider`:
+O acesso a usuários é feito pela interface `IUserStore`, com implementação em
+SQLite (`Data/Sqlite`). O arquivo é definido em `Database:Path`:
 
-| Provider     | Uso                                                                 |
-|--------------|---------------------------------------------------------------------|
-| `Mock`       | Padrão. Dados fixos em memória, só permitido em Development.         |
-| `PostgreSql` | PostgreSQL local, lendo a connection string `ConnectionStrings:PostgreSql`. |
+- Caminho relativo: resolvido a partir da pasta do projeto. Padrão: `data/personalcontrol.db`.
+- Caminho absoluto também é aceito (`Database__Path` por variável de ambiente).
 
-Usuários mock para testes (senhas só valem no modo Mock):
+Ao iniciar, a API cria a pasta, o arquivo e a tabela `users` caso não existam.
+Não é preciso rodar script de criação.
 
-- `demo@teste.com` / `Senha@123`
-- `maria@teste.com` / `Senha@456`
+### Primeiro acesso
 
-Para usar o PostgreSQL:
+Enquanto o banco não tiver nenhum usuário, o front exibe a tela de primeiro
+acesso. O cadastro cria o usuário e já faz o login. Depois do primeiro cadastro,
+`POST /auth/register` responde `403` e o front volta para o login normal.
 
-1. Crie o banco local e rode `Database/001_create_users.sql` uma vez.
-2. Defina a connection string fora do repositório, por exemplo com
-   `dotnet user-secrets` ou variável de ambiente `ConnectionStrings__PostgreSql`.
-3. Defina `Database:Provider` como `PostgreSql` (ou `Database__Provider`).
+### Acesso coringa (temporário)
 
-Sem a connection string, a API não sobe no modo PostgreSql.
+A seção `WildcardAccess` define um acesso coringa que entra sem consultar o banco.
+Ele só funciona quando `Email` e `Password` estão preenchidos. Os valores de
+desenvolvimento ficam em `appsettings.Development.json`, então o coringa não existe
+fora do ambiente Development. Para remover, apague a seção `WildcardAccess` (e o
+método `IsWildcardLogin` em `Auth/AuthEndpoints.cs`) quando o cadastro estiver definitivo.
+
+Não versione o arquivo `data/` nem senhas de produção: ambos já estão no `.gitignore`.
