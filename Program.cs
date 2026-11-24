@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
 using PersonalControl.Api.Auth;
 using PersonalControl.Api.Data;
+using PersonalControl.Api.Finance;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,7 +19,10 @@ var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOp
 if (string.IsNullOrWhiteSpace(jwt.Key) || jwt.Key.Length < 32)
     throw new InvalidOperationException("Jwt:Key precisa ser configurada com pelo menos 32 caracteres.");
 
-// Acesso a dados: Mock (padrão) ou PostgreSql, conforme "Database:Provider"
+// Acesso coringa temporário (seção "WildcardAccess")
+builder.Services.Configure<WildcardAccessOptions>(builder.Configuration.GetSection("WildcardAccess"));
+
+// Banco SQLite local: cria o arquivo e a tabela de usuários se ainda não existirem.
 builder.Services.AddDataAccess(builder.Configuration, builder.Environment);
 
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
@@ -57,5 +61,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapAuthEndpoints();
+app.MapFinanceEndpoints();
 
 app.Run();

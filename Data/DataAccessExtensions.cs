@@ -1,41 +1,25 @@
-using Npgsql;
 using PersonalControl.Api.Auth;
-using PersonalControl.Api.Data.Mock;
-using PersonalControl.Api.Data.PostgreSql;
+using PersonalControl.Api.Data.Sqlite;
+using PersonalControl.Api.Finance;
 
 namespace PersonalControl.Api.Data;
 
 public static class DataAccessExtensions
 {
+    // Registra o acesso a dados em SQLite. Cria o arquivo e aplica as migrações se necessário.
     public static IServiceCollection AddDataAccess(
         this IServiceCollection services,
         IConfiguration configuration,
         IHostEnvironment environment)
     {
         var options = configuration.GetSection("Database").Get<DatabaseOptions>() ?? new DatabaseOptions();
+        var filePath = Path.GetFullPath(Path.Combine(environment.ContentRootPath, options.Path));
+        var connectionString = SqliteDatabase.BuildConnectionString(filePath);
 
-        switch (options.Provider)
-        {
-            case DatabaseProvider.PostgreSql:
-                var connectionString = configuration.GetConnectionString("PostgreSql");
-                if (string.IsNullOrWhiteSpace(connectionString))
-                    throw new InvalidOperationException(
-                        "ConnectionStrings:PostgreSql precisa ser configurada quando Database:Provider = PostgreSql.");
+        SqliteDatabase.Initialize(connectionString);
 
-                services.AddSingleton(_ => new NpgsqlDataSourceBuilder(connectionString).Build());
-                services.AddSingleton<IUserStore, PostgresUserStore>();
-                break;
-
-            default:
-                // Os dados mock têm senhas conhecidas, então não podem subir em outros ambientes.
-                if (!environment.IsDevelopment())
-                    throw new InvalidOperationException(
-                        "Database:Provider = Mock só é permitido em Development.");
-
-                services.AddSingleton<IUserStore, MockUserStore>();
-                break;
-        }
-
+        services.AddSingleton<IUserStore>(new SqliteUserStore(connectionString));
+        services.AddSingleton(new SqliteFinanceStore(connectionString));
         return services;
     }
 }

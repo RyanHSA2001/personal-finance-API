@@ -5,12 +5,28 @@ Accept: application/json
 
 ###
 
+GET {{PersonalControl.Api_HostAddress}}/auth/setup
+Accept: application/json
+
+###
+
+POST {{PersonalControl.Api_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "name": "Seu Nome",
+  "email": "voce@teste.com",
+  "password": "Senha@123"
+}
+
+###
+
 POST {{PersonalControl.Api_HostAddress}}/auth/login
 Content-Type: application/json
 
 {
-  "email": "demo@teste.com",
-  "password": "Senha@123"
+  "email": "coringa@teste.com",
+  "password": "Coringa@123"
 }
 
 ###

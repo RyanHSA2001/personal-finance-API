@@ -11,3 +11,5 @@ obj/
 .env
 secrets.json
 appsettings.Production.json
+data/
+*.db
