@@ -9,16 +9,17 @@ public static class AuthEndpoints
     {
         var group = app.MapGroup("/auth").WithTags("Auth");
 
-        group.MapPost("/login", (
+        group.MapPost("/login", async (
             LoginRequest request,
             IUserStore users,
             IPasswordHasher<User> hasher,
-            JwtTokenService tokens) =>
+            JwtTokenService tokens,
+            CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
                 return Results.BadRequest(new { error = "Email e senha são obrigatórios." });
 
-            var user = users.FindByEmail(request.Email.Trim());
+            var user = await users.FindByEmailAsync(request.Email.Trim(), cancellationToken);
 
             // Mesma resposta para "usuário não existe" e "senha errada" (evita enumeração de usuários).
             if (user is null)
