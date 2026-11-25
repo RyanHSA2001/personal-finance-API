@@ -1,5 +1,6 @@
 using Npgsql;
 using PersonalControl.Api.Auth;
+using PersonalControl.Api.Cards;
 using PersonalControl.Api.Data.PostgreSql;
 using PersonalControl.Api.Finance;
 
@@ -26,6 +27,7 @@ public static class DataAccessExtensions
         services.AddSingleton(dataSource);
         services.AddSingleton<IUserStore, PostgresUserStore>();
         services.AddSingleton<IFinanceStore, PostgresFinanceStore>();
+        services.AddSingleton<ICardStore, PostgresCardStore>();
         return services;
     }
 }

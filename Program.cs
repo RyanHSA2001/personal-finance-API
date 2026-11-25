@@ -3,8 +3,10 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
 using PersonalControl.Api.Auth;
+using PersonalControl.Api.Cards;
 using PersonalControl.Api.Data;
 using PersonalControl.Api.Finance;
+using PersonalControl.Api.OpenFinance;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,6 +26,17 @@ builder.Services.Configure<WildcardAccessOptions>(builder.Configuration.GetSecti
 
 // Banco PostgreSQL: conecta via Npgsql e aplica as migrações pendentes na inicialização.
 builder.Services.AddDataAccess(builder.Configuration);
+
+// Open Finance via Pluggy (credenciais criptografadas por usuário ou fallback via user-secrets).
+builder.Services.Configure<PluggyOptions>(builder.Configuration.GetSection("Pluggy"));
+builder.Services.AddSingleton<SecretProtector>();
+builder.Services.AddHttpClient<PluggyApiClient>((sp, client) =>
+{
+    var baseUrl = builder.Configuration["Pluggy:BaseUrl"] ?? "https://api.pluggy.ai";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromSeconds(45);
+});
+builder.Services.AddScoped<OpenFinanceSyncService>();
 
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();
@@ -62,5 +75,7 @@ app.UseAuthorization();
 
 app.MapAuthEndpoints();
 app.MapFinanceEndpoints();
+app.MapCardEndpoints();
+app.MapOpenFinanceEndpoints();
 
 app.Run();

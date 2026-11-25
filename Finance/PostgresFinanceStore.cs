@@ -358,12 +358,20 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         var (monthStart, monthEnd) = MonthBounds(month);
         await using var command = dataSource.CreateCommand("""
             SELECT b.id, b.category_id, c.name, c.color, b.monthly_limit_cents,
-                COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
-                          WHERE t.user_id = b.user_id
-                            AND t.category_id = b.category_id
-                            AND t.type = 'expense'
-                            AND t.occurred_on >= @monthStart
-                            AND t.occurred_on < @monthEnd), 0)::BIGINT
+                GREATEST(0,
+                    COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
+                              WHERE t.user_id = b.user_id
+                                AND t.category_id = b.category_id
+                                AND t.type = 'expense'
+                                AND NOT t.is_card_payment
+                                AND t.occurred_on >= @monthStart
+                                AND t.occurred_on < @monthEnd), 0)
+                    + COALESCE((SELECT SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)::BIGINT
+                                FROM card_transactions ct
+                                WHERE ct.user_id = b.user_id
+                                  AND ct.category_id = b.category_id
+                                  AND ct.billing_month = @month), 0)
+                )::BIGINT
             FROM budgets b
             JOIN categories c ON c.id = b.category_id
             WHERE b.user_id = @userId
@@ -372,6 +380,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         command.Parameters.AddWithValue("userId", userId);
         command.Parameters.AddWithValue("monthStart", monthStart);
         command.Parameters.AddWithValue("monthEnd", monthEnd);
+        command.Parameters.AddWithValue("month", month);
 
         var budgets = new List<BudgetDto>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -423,6 +432,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         var expenseByCategory = await LoadExpenseByCategoryAsync(userId, month, ct);
         var budgets = await ListBudgetsAsync(userId, month, ct);
         var recent = await ListTransactionsAsync(userId, month: month, limit: 8, ct: ct);
+        var (monthCardInvoices, openCardInvoices) = await LoadCardInvoicesSummaryAsync(userId, month, ct);
 
         return new DashboardDto(
             Month: month,
@@ -430,11 +440,36 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
             MonthIncomeCents: current.IncomeCents,
             MonthExpenseCents: current.ExpenseCents,
             MonthNetCents: current.IncomeCents - current.ExpenseCents,
+            MonthCardInvoicesCents: monthCardInvoices,
+            OpenCardInvoicesCents: openCardInvoices,
             Accounts: accounts,
             ExpenseByCategory: expenseByCategory,
             MonthlyTrend: trend,
             Budgets: budgets,
             RecentTransactions: recent);
+    }
+
+    private async Task<(long TotalCents, long OpenCents)> LoadCardInvoicesSummaryAsync(
+        Guid userId,
+        string month,
+        CancellationToken ct)
+    {
+        await using var command = dataSource.CreateCommand("""
+            SELECT
+                COALESCE(SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END), 0)::BIGINT,
+                COALESCE(SUM(CASE WHEN ci.id IS NULL THEN
+                    (CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)
+                ELSE 0 END), 0)::BIGINT
+            FROM card_transactions ct
+            LEFT JOIN card_invoices ci ON ci.card_id = ct.card_id AND ci.billing_month = ct.billing_month
+            WHERE ct.user_id = @userId AND ct.billing_month = @month
+            """);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("month", month);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        await reader.ReadAsync(ct);
+        return (Math.Max(0, reader.GetInt64(0)), Math.Max(0, reader.GetInt64(1)));
     }
 
     private async Task<List<MonthTrendDto>> LoadTrendAsync(
@@ -443,18 +478,32 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         DateOnly endExclusive,
         CancellationToken ct)
     {
+        var firstMonthKey = firstMonth.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+        var lastMonthKey = endExclusive.AddMonths(-1).ToString("yyyy-MM", CultureInfo.InvariantCulture);
+
         await using var command = dataSource.CreateCommand("""
             SELECT to_char(occurred_on, 'YYYY-MM'), type, SUM(amount_cents)::BIGINT
             FROM transactions
             WHERE user_id = @userId
               AND type IN ('income', 'expense')
+              AND NOT is_card_payment
               AND occurred_on >= @from
               AND occurred_on < @to
             GROUP BY 1, 2
+            UNION ALL
+            SELECT billing_month, 'expense',
+                SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END)::BIGINT
+            FROM card_transactions
+            WHERE user_id = @userId
+              AND billing_month >= @fromMonth
+              AND billing_month <= @toMonth
+            GROUP BY 1
             """);
         command.Parameters.AddWithValue("userId", userId);
         command.Parameters.AddWithValue("from", firstMonth);
         command.Parameters.AddWithValue("to", endExclusive);
+        command.Parameters.AddWithValue("fromMonth", firstMonthKey);
+        command.Parameters.AddWithValue("toMonth", lastMonthKey);
 
         var totals = new Dictionary<string, (long Income, long Expense)>();
         await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -476,7 +525,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
             .Select(key =>
             {
                 var (income, expense) = totals.GetValueOrDefault(key);
-                return new MonthTrendDto(key, income, expense);
+                return new MonthTrendDto(key, income, Math.Max(0, expense));
             })
             .ToList();
     }
@@ -488,19 +537,35 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
     {
         var (monthStart, monthEnd) = MonthBounds(month);
         await using var command = dataSource.CreateCommand("""
-            SELECT t.category_id, COALESCE(c.name, 'Sem categoria'), COALESCE(c.color, '#94a3b8'), SUM(t.amount_cents)::BIGINT
-            FROM transactions t
-            LEFT JOIN categories c ON c.id = t.category_id
-            WHERE t.user_id = @userId
-              AND t.type = 'expense'
-              AND t.occurred_on >= @monthStart
-              AND t.occurred_on < @monthEnd
-            GROUP BY t.category_id, c.name, c.color
+            WITH combined AS (
+                SELECT category_id, amount_cents AS signed_cents
+                FROM transactions
+                WHERE user_id = @userId
+                  AND type = 'expense'
+                  AND NOT is_card_payment
+                  AND occurred_on >= @monthStart
+                  AND occurred_on < @monthEnd
+                UNION ALL
+                SELECT category_id,
+                    CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END AS signed_cents
+                FROM card_transactions
+                WHERE user_id = @userId
+                  AND billing_month = @month
+            )
+            SELECT combined.category_id,
+                   COALESCE(c.name, 'Sem categoria'),
+                   COALESCE(c.color, '#94a3b8'),
+                   SUM(combined.signed_cents)::BIGINT AS total
+            FROM combined
+            LEFT JOIN categories c ON c.id = combined.category_id
+            GROUP BY combined.category_id, c.name, c.color
+            HAVING SUM(combined.signed_cents) > 0
             ORDER BY 4 DESC
             """);
         command.Parameters.AddWithValue("userId", userId);
         command.Parameters.AddWithValue("monthStart", monthStart);
         command.Parameters.AddWithValue("monthEnd", monthEnd);
+        command.Parameters.AddWithValue("month", month);
 
         var result = new List<CategorySpendDto>();
         await using var reader = await command.ExecuteReaderAsync(ct);

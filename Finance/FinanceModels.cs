@@ -54,6 +54,8 @@ public record DashboardDto(
     long MonthIncomeCents,
     long MonthExpenseCents,
     long MonthNetCents,
+    long MonthCardInvoicesCents,
+    long OpenCardInvoicesCents,
     IReadOnlyList<AccountDto> Accounts,
     IReadOnlyList<CategorySpendDto> ExpenseByCategory,
     IReadOnlyList<MonthTrendDto> MonthlyTrend,
