@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
@@ -18,6 +19,7 @@ public class OpenFinanceSyncService(
     IOptions<PluggyOptions> serverOptions)
 {
     private static readonly Regex TrailingDigits = new(@"(\d{4})\D*$");
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ItemLocks = new(StringComparer.Ordinal);
     private readonly PluggyOptions _serverOptions = serverOptions.Value;
 
     // ---------- Credenciais criptografadas por usuário ----------
@@ -254,14 +256,81 @@ public class OpenFinanceSyncService(
         if (pluggyItemId is null)
             return null;
 
-        var creds = await RequireCredentialsAsync(userId, ct);
-        if (triggerRemoteRefresh)
-            await pluggy.TriggerItemUpdateAsync(creds, pluggyItemId, ct);
+        var itemLock = ItemLocks.GetOrAdd(pluggyItemId, _ => new SemaphoreSlim(1, 1));
+        await itemLock.WaitAsync(ct);
+        try
+        {
+            var creds = await RequireCredentialsAsync(userId, ct);
+            if (triggerRemoteRefresh)
+                await pluggy.TriggerItemUpdateAsync(creds, pluggyItemId, ct);
 
-        var remoteItem = await pluggy.GetItemAsync(creds, pluggyItemId, ct);
-        await UpsertItemRowAsync(userId, remoteItem, ct);
-        return await SyncItemCoreAsync(userId, creds, itemRowId, remoteItem, days, ct);
+            var remoteItem = await pluggy.GetItemAsync(creds, pluggyItemId, ct);
+
+            // Se disparou atualização no banco, aguarda até ~30s enquanto o Pluggy estiver em UPDATING
+            // para já devolver os lançamentos novos sem precisar clicar manualmente de novo.
+            if (triggerRemoteRefresh)
+            {
+                const int maxPolls = 10;
+                for (var attempt = 0; attempt < maxPolls && IsUpdating(remoteItem.Status); attempt++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                    remoteItem = await pluggy.GetItemAsync(creds, pluggyItemId, ct);
+                }
+            }
+
+            await UpsertItemRowAsync(userId, remoteItem, ct);
+            return await SyncItemCoreAsync(userId, creds, itemRowId, remoteItem, days, ct);
+        }
+        finally
+        {
+            itemLock.Release();
+        }
     }
+
+    // Usado pelo webhook do Pluggy: localiza o item já vinculado no banco e puxa dados autenticados direto da API Pluggy.
+    public async Task<int> SyncByPluggyItemIdAsync(string pluggyItemId, int days, CancellationToken ct = default)
+    {
+        var targets = new List<(Guid UserId, Guid ItemRowId)>();
+        await using (var cmd = dataSource.CreateCommand("""
+            SELECT user_id, id
+            FROM pluggy_items
+            WHERE pluggy_item_id = @pluggyItemId
+            """))
+        {
+            cmd.Parameters.AddWithValue("pluggyItemId", pluggyItemId.Trim());
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                targets.Add((reader.GetGuid(0), reader.GetGuid(1)));
+        }
+
+        var synced = 0;
+        foreach (var (userId, itemRowId) in targets)
+        {
+            await SyncExistingItemAsync(userId, itemRowId, days, triggerRemoteRefresh: false, ct);
+            synced++;
+        }
+
+        return synced;
+    }
+
+    public async Task<IReadOnlyList<PluggySyncTarget>> ListAllSyncTargetsAsync(CancellationToken ct = default)
+    {
+        var list = new List<PluggySyncTarget>();
+        await using var cmd = dataSource.CreateCommand("""
+            SELECT user_id, id, pluggy_item_id
+            FROM pluggy_items
+            ORDER BY last_synced_at ASC NULLS FIRST
+            """);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add(new PluggySyncTarget(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2)));
+
+        return list;
+    }
+
+    private static bool IsUpdating(string? status) =>
+        string.Equals(status, "UPDATING", StringComparison.OrdinalIgnoreCase);
 
     public async Task<IReadOnlyList<PluggyInvestmentDto>?> ListItemInvestmentsAsync(
         Guid userId,

@@ -70,3 +70,10 @@ public record SyncItemResultDto(
     int CardTransactionsImported,
     int InvestmentsCount,
     long InvestmentsTotalCents);
+
+public record PluggyWebhookPayload(
+    string? Event,
+    string? ItemId,
+    string? EventId);
+
+public record PluggySyncTarget(Guid UserId, Guid ItemRowId, string PluggyItemId);

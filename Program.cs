@@ -56,6 +56,16 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
+
+    options.AddPolicy(OpenFinanceEndpoints.WebhookRateLimitPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
 });
 
 // Configuração JWT (seção "Jwt" do appsettings)
@@ -78,6 +88,8 @@ builder.Services.AddHttpClient<PluggyApiClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(45);
 });
 builder.Services.AddScoped<OpenFinanceSyncService>();
+builder.Services.AddSingleton<OpenFinanceAutoSyncWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OpenFinanceAutoSyncWorker>());
 
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<JwtTokenService>();

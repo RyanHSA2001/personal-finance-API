@@ -1,12 +1,61 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Extensions.Options;
 using PersonalControl.Api.Finance;
 
 namespace PersonalControl.Api.OpenFinance;
 
 public static class OpenFinanceEndpoints
 {
+    public const string WebhookRateLimitPolicy = "openfinance-webhook";
+
+    private static readonly HashSet<string> SyncEvents = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "item/created",
+        "item/updated",
+        "transactions/created",
+        "transactions/updated",
+        "transactions/deleted",
+    };
+
     public static IEndpointRouteBuilder MapOpenFinanceEndpoints(this IEndpointRouteBuilder app)
     {
+        // Webhook público chamado pelo Pluggy quando um banco termina de atualizar.
+        // Não confia nos dados do payload: apenas enfileira o itemId já vinculado para busca autenticada na API Pluggy.
+        app.MapPost("/open-finance/webhook", (
+            HttpContext httpContext,
+            PluggyWebhookPayload? payload,
+            IOptions<PluggyOptions> options,
+            OpenFinanceAutoSyncWorker worker) =>
+        {
+            var expectedSecret = options.Value.WebhookSecret?.Trim();
+            if (!string.IsNullOrEmpty(expectedSecret))
+            {
+                var provided = httpContext.Request.Headers["X-Pluggy-Webhook-Secret"].FirstOrDefault()
+                    ?? httpContext.Request.Query["secret"].FirstOrDefault()
+                    ?? string.Empty;
+
+                if (!FixedTimeEquals(provided, expectedSecret))
+                    return Results.Unauthorized();
+            }
+
+            var itemId = payload?.ItemId?.Trim();
+            var eventName = payload?.Event?.Trim();
+            if (string.IsNullOrEmpty(itemId))
+                return Results.Ok(new { ignored = true });
+
+            if (!string.IsNullOrEmpty(eventName) && !SyncEvents.Contains(eventName))
+                return Results.Ok(new { ignored = true, eventName });
+
+            worker.EnqueueWebhookSync(itemId);
+            return Results.Accepted(value: new { queued = true, itemId });
+        })
+        .WithTags("OpenFinance")
+        .WithName("PluggyWebhook")
+        .AllowAnonymous()
+        .RequireRateLimiting(WebhookRateLimitPolicy);
+
         var group = app.MapGroup("/open-finance").WithTags("OpenFinance").RequireAuthorization();
 
         group.MapGet("/status", async (
@@ -148,5 +197,12 @@ public static class OpenFinanceEndpoints
                 : Results.NotFound());
 
         return app;
+    }
+
+    private static bool FixedTimeEquals(string a, string b)
+    {
+        var bytesA = Encoding.UTF8.GetBytes(a);
+        var bytesB = Encoding.UTF8.GetBytes(b);
+        return bytesA.Length == bytesB.Length && CryptographicOperations.FixedTimeEquals(bytesA, bytesB);
     }
 }
