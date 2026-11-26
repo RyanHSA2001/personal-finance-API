@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using Npgsql;
 using NpgsqlTypes;
+using PersonalControl.Api.Cards;
 
 namespace PersonalControl.Api.Finance;
 
@@ -467,6 +468,66 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         string month,
         CancellationToken ct)
     {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-3));
+        var currentCalendarMonth = today.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+
+        // No mês atual, considera a fatura atual de cada cartão de crédito (conforme o dia de fechamento).
+        // Ex.: hoje 26/11 com cartão que fecha dia 14 -> fatura atual já é 2026-12.
+        if (month == currentCalendarMonth)
+        {
+            var cardMonths = new List<(Guid CardId, string BillingMonth)>();
+            await using (var cardsCmd = dataSource.CreateCommand("""
+                SELECT id, closing_day
+                FROM cards
+                WHERE user_id = @userId AND kind = 'credit' AND is_archived = FALSE AND closing_day IS NOT NULL
+                """))
+            {
+                cardsCmd.Parameters.AddWithValue("userId", userId);
+                await using var r = await cardsCmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                {
+                    var cardId = r.GetGuid(0);
+                    var closingDay = r.GetInt16(1);
+                    cardMonths.Add((cardId, PostgresCardStore.ResolveBillingMonth(today, closingDay)));
+                }
+            }
+
+            if (cardMonths.Count == 0)
+                return (0, 0);
+
+            long totalSum = 0;
+            long openSum = 0;
+
+            foreach (var (cardId, billingMonth) in cardMonths)
+            {
+                await using var cmd = dataSource.CreateCommand("""
+                    SELECT
+                        COALESCE((
+                            SELECT SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END)::BIGINT
+                            FROM card_transactions
+                            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @billingMonth
+                        ), 0)::BIGINT,
+                        COALESCE((
+                            SELECT SUM(paid_amount_cents)::BIGINT
+                            FROM card_invoices
+                            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @billingMonth
+                        ), 0)::BIGINT
+                    """);
+                cmd.Parameters.AddWithValue("userId", userId);
+                cmd.Parameters.AddWithValue("cardId", cardId);
+                cmd.Parameters.AddWithValue("billingMonth", billingMonth);
+
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                await r.ReadAsync(ct);
+                var total = Math.Max(0, r.GetInt64(0));
+                var paid = Math.Max(0, r.GetInt64(1));
+                totalSum += total;
+                openSum += Math.Max(0, total - paid);
+            }
+
+            return (totalSum, openSum);
+        }
+
         await using var command = dataSource.CreateCommand("""
             WITH tx_by_card AS (
                 SELECT card_id,
