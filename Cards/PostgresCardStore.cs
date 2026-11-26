@@ -150,17 +150,15 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             }
         }
 
-        // Pagamento registrado (se houver)
-        long? paidAmountCents = null;
-        string? paidOn = null;
-        Guid? paymentAccountId = null;
-        string? paymentAccountName = null;
+        // Pagamentos registrados (suporta pagamento total ou múltiplos parciais)
+        var payments = new List<CardInvoicePaymentDto>();
 
         await using (var invCmd = dataSource.CreateCommand("""
-            SELECT ci.paid_amount_cents, ci.paid_on, ci.payment_account_id, a.name
+            SELECT ci.id, ci.paid_amount_cents, ci.paid_on, ci.payment_account_id, a.name
             FROM card_invoices ci
             LEFT JOIN accounts a ON a.id = ci.payment_account_id
             WHERE ci.user_id = @userId AND ci.card_id = @cardId AND ci.billing_month = @month
+            ORDER BY ci.paid_on ASC, ci.created_at ASC
             """))
         {
             invCmd.Parameters.AddWithValue("userId", userId);
@@ -168,18 +166,25 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             invCmd.Parameters.AddWithValue("month", billingMonth);
 
             await using var reader = await invCmd.ExecuteReaderAsync(ct);
-            if (await reader.ReadAsync(ct))
+            while (await reader.ReadAsync(ct))
             {
-                paidAmountCents = reader.GetInt64(0);
-                paidOn = reader.GetFieldValue<DateOnly>(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-                paymentAccountId = reader.IsDBNull(2) ? null : reader.GetGuid(2);
-                paymentAccountName = reader.IsDBNull(3) ? null : reader.GetString(3);
+                payments.Add(new CardInvoicePaymentDto(
+                    Id: reader.GetGuid(0),
+                    AmountCents: reader.GetInt64(1),
+                    PaidOn: reader.GetFieldValue<DateOnly>(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    AccountId: reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                    AccountName: reader.IsDBNull(4) ? null : reader.GetString(4)));
             }
         }
 
         var totalCents = items.Sum(i => i.Type == "purchase" ? i.AmountCents : -i.AmountCents);
+        var paidTotalCents = payments.Sum(p => p.AmountCents);
+        var remainingCents = Math.Max(0, totalCents - paidTotalCents);
+        var isFullyPaid = totalCents > 0 && paidTotalCents >= totalCents;
+        var lastPayment = payments.LastOrDefault();
+
         var (closingDate, dueDate) = ComputeInvoiceDates(billingMonth, closingDay, dueDay);
-        var status = ResolveInvoiceStatus(paidAmountCents.HasValue, totalCents, closingDate, dueDate);
+        var status = ResolveInvoiceStatus(isFullyPaid, totalCents, closingDate, dueDate);
 
         return new CardInvoiceDto(
             CardId: cardId,
@@ -189,10 +194,12 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             DueDate: dueDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             Status: status,
             TotalCents: totalCents,
-            PaidAmountCents: paidAmountCents,
-            PaidOn: paidOn,
-            PaymentAccountId: paymentAccountId,
-            PaymentAccountName: paymentAccountName,
+            PaidAmountCents: paidTotalCents > 0 ? paidTotalCents : null,
+            RemainingCents: remainingCents,
+            PaidOn: lastPayment?.PaidOn,
+            PaymentAccountId: lastPayment?.AccountId,
+            PaymentAccountName: lastPayment?.AccountName,
+            Payments: payments,
             Items: items);
     }
 
@@ -379,16 +386,16 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             cardName = scalar;
         }
 
-        await using (var existsCmd = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM card_invoices WHERE card_id = @cardId AND user_id = @userId AND billing_month = @month)",
+        long alreadyPaid;
+        await using (var paidCmd = new NpgsqlCommand(
+            "SELECT COALESCE(SUM(paid_amount_cents), 0)::BIGINT FROM card_invoices WHERE card_id = @cardId AND user_id = @userId AND billing_month = @month",
             connection,
             transaction))
         {
-            existsCmd.Parameters.AddWithValue("cardId", cardId);
-            existsCmd.Parameters.AddWithValue("userId", userId);
-            existsCmd.Parameters.AddWithValue("month", billingMonth);
-            if (Convert.ToBoolean(await existsCmd.ExecuteScalarAsync(ct)))
-                return PayInvoiceResult.AlreadyPaid;
+            paidCmd.Parameters.AddWithValue("cardId", cardId);
+            paidCmd.Parameters.AddWithValue("userId", userId);
+            paidCmd.Parameters.AddWithValue("month", billingMonth);
+            alreadyPaid = Convert.ToInt64(await paidCmd.ExecuteScalarAsync(ct));
         }
 
         long invoiceTotal;
@@ -404,14 +411,23 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             invoiceTotal = Convert.ToInt64(await sumCmd.ExecuteScalarAsync(ct));
         }
 
-        var paidAmount = request.AmountCents ?? invoiceTotal;
+        if (invoiceTotal <= 0)
+            return PayInvoiceResult.EmptyInvoice;
+
+        var remaining = Math.Max(0, invoiceTotal - alreadyPaid);
+        if (remaining <= 0)
+            return PayInvoiceResult.AlreadyPaid;
+
+        var paidAmount = request.AmountCents ?? remaining;
         if (paidAmount <= 0)
             return PayInvoiceResult.EmptyInvoice;
 
         // Cria o débito na conta bancária com is_card_payment = TRUE (debita o saldo sem duplicar despesas nos gráficos).
         var paymentTxId = Guid.NewGuid();
         var formattedMonth = $"{billingMonth[5..7]}/{billingMonth[..4]}";
-        var description = $"Pagamento fatura {cardName} ({formattedMonth})";
+        var description = paidAmount < remaining
+            ? $"Pagamento parcial fatura {cardName} ({formattedMonth})"
+            : $"Pagamento fatura {cardName} ({formattedMonth})";
 
         await using (var txCmd = new NpgsqlCommand("""
             INSERT INTO transactions
@@ -460,13 +476,73 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
         await using var connection = await dataSource.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
-        Guid? paymentTxId;
+        var paymentTxIds = new List<Guid>();
         await using (var findCmd = new NpgsqlCommand("""
             SELECT payment_transaction_id
             FROM card_invoices
             WHERE user_id = @userId AND card_id = @cardId AND billing_month = @month
             """, connection, transaction))
         {
+            findCmd.Parameters.AddWithValue("userId", userId);
+            findCmd.Parameters.AddWithValue("cardId", cardId);
+            findCmd.Parameters.AddWithValue("month", billingMonth);
+
+            await using var reader = await findCmd.ExecuteReaderAsync(ct);
+            var any = false;
+            while (await reader.ReadAsync(ct))
+            {
+                any = true;
+                if (!reader.IsDBNull(0))
+                    paymentTxIds.Add(reader.GetGuid(0));
+            }
+            if (!any)
+                return false;
+        }
+
+        await using (var delInv = new NpgsqlCommand("""
+            DELETE FROM card_invoices
+            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @month
+            """, connection, transaction))
+        {
+            delInv.Parameters.AddWithValue("userId", userId);
+            delInv.Parameters.AddWithValue("cardId", cardId);
+            delInv.Parameters.AddWithValue("month", billingMonth);
+            await delInv.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var txId in paymentTxIds)
+        {
+            await using var delTx = new NpgsqlCommand("""
+                DELETE FROM transactions
+                WHERE id = @id AND user_id = @userId AND is_card_payment = TRUE
+                """, connection, transaction);
+            delTx.Parameters.AddWithValue("id", txId);
+            delTx.Parameters.AddWithValue("userId", userId);
+            await delTx.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return true;
+    }
+
+    public async Task<bool> DeleteInvoicePaymentAsync(
+        Guid userId,
+        Guid cardId,
+        string billingMonth,
+        Guid paymentId,
+        CancellationToken ct = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        Guid? paymentTxId;
+        await using (var findCmd = new NpgsqlCommand("""
+            SELECT payment_transaction_id
+            FROM card_invoices
+            WHERE id = @paymentId AND user_id = @userId AND card_id = @cardId AND billing_month = @month
+            """, connection, transaction))
+        {
+            findCmd.Parameters.AddWithValue("paymentId", paymentId);
             findCmd.Parameters.AddWithValue("userId", userId);
             findCmd.Parameters.AddWithValue("cardId", cardId);
             findCmd.Parameters.AddWithValue("month", billingMonth);
@@ -480,9 +556,10 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
 
         await using (var delInv = new NpgsqlCommand("""
             DELETE FROM card_invoices
-            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @month
+            WHERE id = @paymentId AND user_id = @userId AND card_id = @cardId AND billing_month = @month
             """, connection, transaction))
         {
+            delInv.Parameters.AddWithValue("paymentId", paymentId);
             delInv.Parameters.AddWithValue("userId", userId);
             delInv.Parameters.AddWithValue("cardId", cardId);
             delInv.Parameters.AddWithValue("month", billingMonth);
@@ -535,12 +612,18 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
             SELECT
                 c.id, c.name, c.kind, c.brand, c.issuer, c.last4, c.color,
                 c.credit_limit_cents,
-                COALESCE((
-                    SELECT SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)::BIGINT
-                    FROM card_transactions ct
-                    LEFT JOIN card_invoices ci ON ci.card_id = ct.card_id AND ci.billing_month = ct.billing_month
-                    WHERE ct.card_id = c.id AND ct.user_id = c.user_id AND ci.id IS NULL
-                ), 0)::BIGINT AS used_limit_cents,
+                GREATEST(0,
+                    COALESCE((
+                        SELECT SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)::BIGINT
+                        FROM card_transactions ct
+                        WHERE ct.card_id = c.id AND ct.user_id = c.user_id
+                    ), 0)
+                    - COALESCE((
+                        SELECT SUM(ci.paid_amount_cents)::BIGINT
+                        FROM card_invoices ci
+                        WHERE ci.card_id = c.id AND ci.user_id = c.user_id
+                    ), 0)
+                )::BIGINT AS used_limit_cents,
                 c.closing_day, c.due_day,
                 c.default_payment_account_id, pa.name,
                 c.linked_account_id, la.name,
@@ -667,10 +750,11 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
                     FROM card_transactions
                     WHERE user_id = @userId AND card_id = @cardId AND billing_month = @month
                 ), 0)::BIGINT,
-                EXISTS (
-                    SELECT 1 FROM card_invoices
+                COALESCE((
+                    SELECT SUM(paid_amount_cents)::BIGINT
+                    FROM card_invoices
                     WHERE user_id = @userId AND card_id = @cardId AND billing_month = @month
-                )
+                ), 0)::BIGINT
             """);
         cmd.Parameters.AddWithValue("userId", userId);
         cmd.Parameters.AddWithValue("cardId", cardId);
@@ -678,7 +762,9 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
-        return (reader.GetInt64(0), reader.GetBoolean(1));
+        var total = reader.GetInt64(0);
+        var paid = reader.GetInt64(1);
+        return (total, total > 0 && paid >= total);
     }
 
     private static void BindCardParameters(NpgsqlCommand command, Guid id, Guid userId, CardRequest request)

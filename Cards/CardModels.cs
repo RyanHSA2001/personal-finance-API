@@ -65,6 +65,13 @@ public record CardTransactionDto(
     int InstallmentNumber,
     int InstallmentTotal);
 
+public record CardInvoicePaymentDto(
+    Guid Id,
+    long AmountCents,
+    string PaidOn,
+    Guid? AccountId,
+    string? AccountName);
+
 public record CardInvoiceDto(
     Guid CardId,
     string CardName,
@@ -74,9 +81,11 @@ public record CardInvoiceDto(
     string Status,
     long TotalCents,
     long? PaidAmountCents,
+    long RemainingCents,
     string? PaidOn,
     Guid? PaymentAccountId,
     string? PaymentAccountName,
+    IReadOnlyList<CardInvoicePaymentDto> Payments,
     IReadOnlyList<CardTransactionDto> Items);
 
 public record PayInvoiceRequest(

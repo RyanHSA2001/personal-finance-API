@@ -125,6 +125,22 @@ public static class CardEndpoints
                 : Results.NotFound(new { error = "Pagamento da fatura não encontrado." });
         });
 
+        group.MapDelete("/{id:guid}/invoices/{month}/payments/{paymentId:guid}", async (
+            Guid id,
+            string month,
+            Guid paymentId,
+            ClaimsPrincipal principal,
+            ICardStore cards,
+            CancellationToken ct) =>
+        {
+            if (!MonthPattern.IsMatch(month))
+                return Results.BadRequest(new { error = "Mês deve estar no formato AAAA-MM." });
+
+            return await cards.DeleteInvoicePaymentAsync(principal.GetUserId(), id, month, paymentId, ct)
+                ? Results.NoContent()
+                : Results.NotFound(new { error = "Pagamento não encontrado." });
+        });
+
         // ---------- Compras / Parcelas / Estornos no cartão ----------
 
         group.MapPost("/{id:guid}/transactions", async (

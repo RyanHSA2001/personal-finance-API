@@ -51,4 +51,11 @@ public interface ICardStore
         Guid cardId,
         string billingMonth,
         CancellationToken ct = default);
+
+    Task<bool> DeleteInvoicePaymentAsync(
+        Guid userId,
+        Guid cardId,
+        string billingMonth,
+        Guid paymentId,
+        CancellationToken ct = default);
 }

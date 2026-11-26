@@ -47,6 +47,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 10)
             ApplyMigration10(connection);
+
+        if (currentVersion < 11)
+            ApplyMigration11(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -412,6 +415,20 @@ public static class PostgresDatabase
             CREATE INDEX IF NOT EXISTS idx_recurring_user_id ON recurring_transactions (user_id, day_of_month);
 
             INSERT INTO schema_migrations (version) VALUES (10)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Permite múltiplos pagamentos parciais na mesma fatura (remove UNIQUE de card_id + billing_month).
+    private static void ApplyMigration11(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            ALTER TABLE card_invoices
+                DROP CONSTRAINT IF EXISTS card_invoices_card_id_billing_month_key;
+
+            INSERT INTO schema_migrations (version) VALUES (11)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();
