@@ -1,5 +1,6 @@
 using System.Globalization;
 using Npgsql;
+using PersonalControl.Api.Finance;
 
 namespace PersonalControl.Api.Goals;
 
@@ -16,10 +17,9 @@ public class PostgresGoalStore(NpgsqlDataSource dataSource) : IGoalStore
         var daysInMonth = DateTime.DaysInMonth(monthStart.Year, monthStart.Month);
         var monthEnd = new DateOnly(monthStart.Year, monthStart.Month, daysInMonth);
 
-        var (monthIncome, monthExpense) = await GetMonthTotalsAsync(userId, monthStart, monthEnd, ct);
-        var monthNet = monthIncome - monthExpense;
+        var summary = await MonthSummaryCalculator.ComputeAsync(dataSource, userId, month, today, ct);
 
-        var goals = await ListGoalsAsync(userId, monthNet, ct);
+        var goals = await ListGoalsAsync(userId, summary.NetCents, ct);
         var (dailyLimitCents, includeCards) = await GetDailyBudgetSettingsAsync(userId, ct);
 
         var spentByDay = await GetDailyExpensesAsync(userId, monthStart, monthEnd, includeCards, ct);
@@ -106,9 +106,11 @@ public class PostgresGoalStore(NpgsqlDataSource dataSource) : IGoalStore
         return new GoalsOverviewDto(
             Month: month,
             Today: today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            MonthIncomeCents: monthIncome,
-            MonthExpenseCents: monthExpense,
-            MonthNetCents: monthNet,
+            MonthIncomeCents: summary.IncomeCents,
+            MonthAccountExpenseCents: summary.AccountExpenseCents,
+            MonthCardInvoicesCents: summary.CardInvoicesCents,
+            MonthExpenseCents: summary.TotalExpenseCents,
+            MonthNetCents: summary.NetCents,
             Goals: goals,
             DailyBudget: dailyBudget);
     }
@@ -185,31 +187,6 @@ public class PostgresGoalStore(NpgsqlDataSource dataSource) : IGoalStore
             "DELETE FROM daily_budget_settings WHERE user_id = @userId");
         command.Parameters.AddWithValue("userId", userId);
         await command.ExecuteNonQueryAsync(ct);
-    }
-
-    private async Task<(long Income, long Expense)> GetMonthTotalsAsync(
-        Guid userId,
-        DateOnly start,
-        DateOnly end,
-        CancellationToken ct)
-    {
-        await using var command = dataSource.CreateCommand("""
-            SELECT
-                COALESCE(SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END), 0)::BIGINT,
-                COALESCE(SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END), 0)::BIGINT
-            FROM transactions
-            WHERE user_id = @userId
-              AND occurred_on BETWEEN @start AND @end
-            """);
-        command.Parameters.AddWithValue("userId", userId);
-        command.Parameters.AddWithValue("start", start);
-        command.Parameters.AddWithValue("end", end);
-
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-            return (0, 0);
-
-        return (reader.GetInt64(0), reader.GetInt64(1));
     }
 
     private async Task<IReadOnlyList<GoalDto>> ListGoalsAsync(Guid userId, long monthNetCents, CancellationToken ct)

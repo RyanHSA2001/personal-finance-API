@@ -433,6 +433,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
     public async Task<DashboardDto> GetDashboardAsync(Guid userId, string month, CancellationToken ct = default)
     {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-3));
         var accounts = await ListAccountsAsync(userId, ct);
         var totalBalance = accounts.Sum(a => a.BalanceCents);
         var projectedBalance = accounts.Sum(a => a.ProjectedBalanceCents);
@@ -440,121 +441,30 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         var (monthStart, monthEnd) = MonthBounds(month);
         var firstMonth = monthStart.AddMonths(-5);
         var trend = await LoadTrendAsync(userId, firstMonth, monthEnd, ct);
-        var current = trend[^1];
+        var summary = await MonthSummaryCalculator.ComputeAsync(dataSource, userId, month, today, ct);
 
-        var expenseByCategory = await LoadExpenseByCategoryAsync(userId, month, ct);
+        // Garante que a barra do mês selecionado no gráfico de tendência reflita o mesmo total dos cards.
+        trend[^1] = new MonthTrendDto(month, summary.IncomeCents, summary.TotalExpenseCents);
+
+        var expenseByCategory = await LoadExpenseByCategoryAsync(userId, month, today, ct);
         var budgets = await ListBudgetsAsync(userId, month, ct);
         var recent = await ListTransactionsAsync(userId, month: month, limit: 8, ct: ct);
-        var (monthCardInvoices, openCardInvoices) = await LoadCardInvoicesSummaryAsync(userId, month, ct);
 
         return new DashboardDto(
             Month: month,
             TotalBalanceCents: totalBalance,
             ProjectedBalanceCents: projectedBalance,
-            MonthIncomeCents: current.IncomeCents,
-            MonthExpenseCents: current.ExpenseCents,
-            MonthNetCents: current.IncomeCents - current.ExpenseCents,
-            MonthCardInvoicesCents: monthCardInvoices,
-            OpenCardInvoicesCents: openCardInvoices,
+            MonthIncomeCents: summary.IncomeCents,
+            MonthAccountExpenseCents: summary.AccountExpenseCents,
+            MonthExpenseCents: summary.TotalExpenseCents,
+            MonthNetCents: summary.NetCents,
+            MonthCardInvoicesCents: summary.CardInvoicesCents,
+            OpenCardInvoicesCents: summary.OpenCardInvoicesCents,
             Accounts: accounts,
             ExpenseByCategory: expenseByCategory,
             MonthlyTrend: trend,
             Budgets: budgets,
             RecentTransactions: recent);
-    }
-
-    private async Task<(long TotalCents, long OpenCents)> LoadCardInvoicesSummaryAsync(
-        Guid userId,
-        string month,
-        CancellationToken ct)
-    {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-3));
-        var currentCalendarMonth = today.ToString("yyyy-MM", CultureInfo.InvariantCulture);
-
-        // No mês atual, considera a fatura atual de cada cartão de crédito (conforme o dia de fechamento).
-        // Ex.: hoje 26/11 com cartão que fecha dia 14 -> fatura atual já é 2026-12.
-        if (month == currentCalendarMonth)
-        {
-            var cardMonths = new List<(Guid CardId, string BillingMonth)>();
-            await using (var cardsCmd = dataSource.CreateCommand("""
-                SELECT id, closing_day
-                FROM cards
-                WHERE user_id = @userId AND kind = 'credit' AND is_archived = FALSE AND closing_day IS NOT NULL
-                """))
-            {
-                cardsCmd.Parameters.AddWithValue("userId", userId);
-                await using var r = await cardsCmd.ExecuteReaderAsync(ct);
-                while (await r.ReadAsync(ct))
-                {
-                    var cardId = r.GetGuid(0);
-                    var closingDay = r.GetInt16(1);
-                    cardMonths.Add((cardId, PostgresCardStore.ResolveBillingMonth(today, closingDay)));
-                }
-            }
-
-            if (cardMonths.Count == 0)
-                return (0, 0);
-
-            long totalSum = 0;
-            long openSum = 0;
-
-            foreach (var (cardId, billingMonth) in cardMonths)
-            {
-                await using var cmd = dataSource.CreateCommand("""
-                    SELECT
-                        COALESCE((
-                            SELECT SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END)::BIGINT
-                            FROM card_transactions
-                            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @billingMonth
-                        ), 0)::BIGINT,
-                        COALESCE((
-                            SELECT SUM(paid_amount_cents)::BIGINT
-                            FROM card_invoices
-                            WHERE user_id = @userId AND card_id = @cardId AND billing_month = @billingMonth
-                        ), 0)::BIGINT
-                    """);
-                cmd.Parameters.AddWithValue("userId", userId);
-                cmd.Parameters.AddWithValue("cardId", cardId);
-                cmd.Parameters.AddWithValue("billingMonth", billingMonth);
-
-                await using var r = await cmd.ExecuteReaderAsync(ct);
-                await r.ReadAsync(ct);
-                var total = Math.Max(0, r.GetInt64(0));
-                var paid = Math.Max(0, r.GetInt64(1));
-                totalSum += total;
-                openSum += Math.Max(0, total - paid);
-            }
-
-            return (totalSum, openSum);
-        }
-
-        await using var command = dataSource.CreateCommand("""
-            WITH tx_by_card AS (
-                SELECT card_id,
-                       COALESCE(SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END), 0)::BIGINT AS total_cents
-                FROM card_transactions
-                WHERE user_id = @userId AND billing_month = @month
-                GROUP BY card_id
-            ),
-            paid_by_card AS (
-                SELECT card_id,
-                       COALESCE(SUM(paid_amount_cents), 0)::BIGINT AS paid_cents
-                FROM card_invoices
-                WHERE user_id = @userId AND billing_month = @month
-                GROUP BY card_id
-            )
-            SELECT
-                COALESCE(SUM(GREATEST(0, t.total_cents)), 0)::BIGINT,
-                COALESCE(SUM(GREATEST(0, t.total_cents - COALESCE(p.paid_cents, 0))), 0)::BIGINT
-            FROM tx_by_card t
-            LEFT JOIN paid_by_card p ON p.card_id = t.card_id
-            """);
-        command.Parameters.AddWithValue("userId", userId);
-        command.Parameters.AddWithValue("month", month);
-
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        await reader.ReadAsync(ct);
-        return (Math.Max(0, reader.GetInt64(0)), Math.Max(0, reader.GetInt64(1)));
     }
 
     private async Task<List<MonthTrendDto>> LoadTrendAsync(
@@ -618,9 +528,67 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
     private async Task<IReadOnlyList<CategorySpendDto>> LoadExpenseByCategoryAsync(
         Guid userId,
         string month,
+        DateOnly today,
         CancellationToken ct)
     {
         var (monthStart, monthEnd) = MonthBounds(month);
+        var currentCalendarMonth = today.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+
+        if (month == currentCalendarMonth)
+        {
+            var activeCards = await MonthSummaryCalculator.ResolveActiveCardMonthsAsync(dataSource, userId, today, ct);
+            var cardIds = activeCards.Select(c => c.CardId).ToArray();
+            var billingMonths = activeCards.Select(c => c.BillingMonth).ToArray();
+
+            await using var activeCmd = dataSource.CreateCommand("""
+                WITH active_cards AS (
+                    SELECT * FROM unnest(@cardIds::uuid[], @billingMonths::text[]) AS ac(card_id, billing_month)
+                ),
+                combined AS (
+                    SELECT category_id, amount_cents AS signed_cents
+                    FROM transactions
+                    WHERE user_id = @userId
+                      AND type = 'expense'
+                      AND NOT is_card_payment
+                      AND occurred_on >= @monthStart
+                      AND occurred_on < @monthEnd
+                    UNION ALL
+                    SELECT ct.category_id,
+                        CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END AS signed_cents
+                    FROM card_transactions ct
+                    JOIN active_cards ac ON ac.card_id = ct.card_id AND ac.billing_month = ct.billing_month
+                    WHERE ct.user_id = @userId
+                )
+                SELECT combined.category_id,
+                       COALESCE(c.name, 'Sem categoria'),
+                       COALESCE(c.color, '#94a3b8'),
+                       SUM(combined.signed_cents)::BIGINT AS total
+                FROM combined
+                LEFT JOIN categories c ON c.id = combined.category_id
+                GROUP BY combined.category_id, c.name, c.color
+                HAVING SUM(combined.signed_cents) > 0
+                ORDER BY 4 DESC
+                """);
+            activeCmd.Parameters.AddWithValue("userId", userId);
+            activeCmd.Parameters.AddWithValue("monthStart", monthStart);
+            activeCmd.Parameters.AddWithValue("monthEnd", monthEnd);
+            activeCmd.Parameters.AddWithValue("cardIds", cardIds);
+            activeCmd.Parameters.AddWithValue("billingMonths", billingMonths);
+
+            var activeResult = new List<CategorySpendDto>();
+            await using var activeReader = await activeCmd.ExecuteReaderAsync(ct);
+            while (await activeReader.ReadAsync(ct))
+            {
+                activeResult.Add(new CategorySpendDto(
+                    activeReader.IsDBNull(0) ? null : activeReader.GetGuid(0),
+                    activeReader.GetString(1),
+                    activeReader.GetString(2),
+                    activeReader.GetInt64(3)));
+            }
+
+            return activeResult;
+        }
+
         await using var command = dataSource.CreateCommand("""
             WITH combined AS (
                 SELECT category_id, amount_cents AS signed_cents

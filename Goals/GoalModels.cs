@@ -44,6 +44,8 @@ public record GoalsOverviewDto(
     string Month,
     string Today,
     long MonthIncomeCents,
+    long MonthAccountExpenseCents,
+    long MonthCardInvoicesCents,
     long MonthExpenseCents,
     long MonthNetCents,
     IReadOnlyList<GoalDto> Goals,

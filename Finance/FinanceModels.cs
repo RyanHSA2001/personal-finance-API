@@ -59,6 +59,7 @@ public record DashboardDto(
     long TotalBalanceCents,
     long ProjectedBalanceCents,
     long MonthIncomeCents,
+    long MonthAccountExpenseCents,
     long MonthExpenseCents,
     long MonthNetCents,
     long MonthCardInvoicesCents,
