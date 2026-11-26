@@ -5,6 +5,7 @@ public interface IFinanceStore
 {
     Task<IReadOnlyList<AccountDto>> ListAccountsAsync(Guid userId, CancellationToken ct = default);
     Task<Guid> AddAccountAsync(Guid userId, AccountRequest request, CancellationToken ct = default);
+    Task<bool> SetAccountOverviewVisibilityAsync(Guid userId, Guid id, bool includeInOverview, CancellationToken ct = default);
     Task<bool> DeleteAccountAsync(Guid userId, Guid id, CancellationToken ct = default);
     Task<bool> AccountBelongsToAsync(Guid userId, Guid id, CancellationToken ct = default);
 

@@ -50,6 +50,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 11)
             ApplyMigration11(connection);
+
+        if (currentVersion < 12)
+            ApplyMigration12(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -429,6 +432,20 @@ public static class PostgresDatabase
                 DROP CONSTRAINT IF EXISTS card_invoices_card_id_billing_month_key;
 
             INSERT INTO schema_migrations (version) VALUES (11)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Flag persistente por conta para incluir ou ocultar na Visão Geral.
+    private static void ApplyMigration12(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            ALTER TABLE accounts
+                ADD COLUMN IF NOT EXISTS include_in_overview BOOLEAN NOT NULL DEFAULT TRUE;
+
+            INSERT INTO schema_migrations (version) VALUES (12)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();

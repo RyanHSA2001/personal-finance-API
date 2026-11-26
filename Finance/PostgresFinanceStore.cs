@@ -48,7 +48,8 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                 - COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
                             WHERE t.account_id = a.id AND t.type IN ('expense', 'transfer')), 0)
                 + COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
-                            WHERE t.transfer_account_id = a.id), 0))::BIGINT AS projected_balance
+                            WHERE t.transfer_account_id = a.id), 0))::BIGINT AS projected_balance,
+                a.include_in_overview
             FROM accounts a
             WHERE a.user_id = @userId
             ORDER BY a.name
@@ -66,7 +67,8 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                 reader.GetString(2),
                 reader.GetInt64(3),
                 reader.GetInt64(4),
-                reader.GetInt64(5)));
+                reader.GetInt64(5),
+                reader.GetBoolean(6)));
         }
 
         return accounts;
@@ -87,6 +89,24 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
         await command.ExecuteNonQueryAsync(ct);
         return id;
+    }
+
+    public async Task<bool> SetAccountOverviewVisibilityAsync(
+        Guid userId,
+        Guid id,
+        bool includeInOverview,
+        CancellationToken ct = default)
+    {
+        await using var command = dataSource.CreateCommand("""
+            UPDATE accounts
+            SET include_in_overview = @includeInOverview
+            WHERE id = @id AND user_id = @userId
+            """);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("includeInOverview", includeInOverview);
+
+        return await command.ExecuteNonQueryAsync(ct) > 0;
     }
 
     public Task<bool> DeleteAccountAsync(Guid userId, Guid id, CancellationToken ct = default) =>
@@ -186,13 +206,23 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
     // ---------- Lançamentos ----------
 
-    public async Task<IReadOnlyList<TransactionDto>> ListTransactionsAsync(
+    public Task<IReadOnlyList<TransactionDto>> ListTransactionsAsync(
         Guid userId,
         string? month = null,
         Guid? accountId = null,
         Guid? categoryId = null,
         int limit = 200,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        ListTransactionsInternalAsync(userId, month, accountId, categoryId, limit, onlyOverviewAccounts: false, ct);
+
+    private async Task<IReadOnlyList<TransactionDto>> ListTransactionsInternalAsync(
+        Guid userId,
+        string? month,
+        Guid? accountId,
+        Guid? categoryId,
+        int limit,
+        bool onlyOverviewAccounts,
+        CancellationToken ct)
     {
         var sql = new StringBuilder("""
             SELECT t.id, t.type, t.amount_cents, t.description, t.occurred_on,
@@ -207,6 +237,11 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
         await using var command = dataSource.CreateCommand();
         command.Parameters.AddWithValue("userId", userId);
+
+        if (onlyOverviewAccounts)
+        {
+            sql.Append(" AND a.include_in_overview = TRUE");
+        }
 
         if (month is not null)
         {
@@ -365,23 +400,36 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
     // ---------- Orçamentos ----------
 
-    public async Task<IReadOnlyList<BudgetDto>> ListBudgetsAsync(Guid userId, string month, CancellationToken ct = default)
+    public Task<IReadOnlyList<BudgetDto>> ListBudgetsAsync(Guid userId, string month, CancellationToken ct = default) =>
+        ListBudgetsInternalAsync(userId, month, onlyOverviewAccounts: false, ct);
+
+    private async Task<IReadOnlyList<BudgetDto>> ListBudgetsInternalAsync(
+        Guid userId,
+        string month,
+        bool onlyOverviewAccounts,
+        CancellationToken ct)
     {
         var (monthStart, monthEnd) = MonthBounds(month);
         await using var command = dataSource.CreateCommand("""
             SELECT b.id, b.category_id, c.name, c.color, b.monthly_limit_cents,
                 GREATEST(0,
-                    COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
+                    COALESCE((SELECT SUM(t.amount_cents)::BIGINT
+                              FROM transactions t
+                              JOIN accounts a ON a.id = t.account_id
                               WHERE t.user_id = b.user_id
                                 AND t.category_id = b.category_id
                                 AND t.type = 'expense'
                                 AND NOT t.is_card_payment
+                                AND (@onlyOverview = FALSE OR a.include_in_overview = TRUE)
                                 AND t.occurred_on >= @monthStart
                                 AND t.occurred_on < @monthEnd), 0)
                     + COALESCE((SELECT SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)::BIGINT
                                 FROM card_transactions ct
+                                JOIN cards cr ON cr.id = ct.card_id
+                                LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
                                 WHERE ct.user_id = b.user_id
                                   AND ct.category_id = b.category_id
+                                  AND (@onlyOverview = FALSE OR ca.id IS NULL OR ca.include_in_overview = TRUE)
                                   AND ct.billing_month = @month), 0)
                 )::BIGINT
             FROM budgets b
@@ -393,6 +441,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         command.Parameters.AddWithValue("monthStart", monthStart);
         command.Parameters.AddWithValue("monthEnd", monthEnd);
         command.Parameters.AddWithValue("month", month);
+        command.Parameters.AddWithValue("onlyOverview", onlyOverviewAccounts);
 
         var budgets = new List<BudgetDto>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -435,8 +484,9 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
     {
         var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-3));
         var accounts = await ListAccountsAsync(userId, ct);
-        var totalBalance = accounts.Sum(a => a.BalanceCents);
-        var projectedBalance = accounts.Sum(a => a.ProjectedBalanceCents);
+        var visibleAccounts = accounts.Where(a => a.IncludeInOverview).ToList();
+        var totalBalance = visibleAccounts.Sum(a => a.BalanceCents);
+        var projectedBalance = visibleAccounts.Sum(a => a.ProjectedBalanceCents);
 
         var (monthStart, monthEnd) = MonthBounds(month);
         var firstMonth = monthStart.AddMonths(-5);
@@ -447,8 +497,8 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         trend[^1] = new MonthTrendDto(month, summary.IncomeCents, summary.TotalExpenseCents);
 
         var expenseByCategory = await LoadExpenseByCategoryAsync(userId, month, today, ct);
-        var budgets = await ListBudgetsAsync(userId, month, ct);
-        var recent = await ListTransactionsAsync(userId, month: month, limit: 8, ct: ct);
+        var budgets = await ListBudgetsInternalAsync(userId, month, onlyOverviewAccounts: true, ct);
+        var recent = await ListTransactionsInternalAsync(userId, month: month, accountId: null, categoryId: null, limit: 8, onlyOverviewAccounts: true, ct: ct);
 
         return new DashboardDto(
             Month: month,
@@ -477,21 +527,26 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         var lastMonthKey = endExclusive.AddMonths(-1).ToString("yyyy-MM", CultureInfo.InvariantCulture);
 
         await using var command = dataSource.CreateCommand("""
-            SELECT to_char(occurred_on, 'YYYY-MM'), type, SUM(amount_cents)::BIGINT
-            FROM transactions
-            WHERE user_id = @userId
-              AND type IN ('income', 'expense')
-              AND NOT is_card_payment
-              AND occurred_on >= @from
-              AND occurred_on < @to
+            SELECT to_char(t.occurred_on, 'YYYY-MM'), t.type, SUM(t.amount_cents)::BIGINT
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            WHERE t.user_id = @userId
+              AND a.include_in_overview = TRUE
+              AND t.type IN ('income', 'expense')
+              AND NOT t.is_card_payment
+              AND t.occurred_on >= @from
+              AND t.occurred_on < @to
             GROUP BY 1, 2
             UNION ALL
-            SELECT billing_month, 'expense',
-                SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END)::BIGINT
-            FROM card_transactions
-            WHERE user_id = @userId
-              AND billing_month >= @fromMonth
-              AND billing_month <= @toMonth
+            SELECT ct.billing_month, 'expense',
+                SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)::BIGINT
+            FROM card_transactions ct
+            JOIN cards cr ON cr.id = ct.card_id
+            LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
+            WHERE ct.user_id = @userId
+              AND (ca.id IS NULL OR ca.include_in_overview = TRUE)
+              AND ct.billing_month >= @fromMonth
+              AND ct.billing_month <= @toMonth
             GROUP BY 1
             """);
         command.Parameters.AddWithValue("userId", userId);
@@ -545,13 +600,15 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                     SELECT * FROM unnest(@cardIds::uuid[], @billingMonths::text[]) AS ac(card_id, billing_month)
                 ),
                 combined AS (
-                    SELECT category_id, amount_cents AS signed_cents
-                    FROM transactions
-                    WHERE user_id = @userId
-                      AND type = 'expense'
-                      AND NOT is_card_payment
-                      AND occurred_on >= @monthStart
-                      AND occurred_on < @monthEnd
+                    SELECT t.category_id, t.amount_cents AS signed_cents
+                    FROM transactions t
+                    JOIN accounts a ON a.id = t.account_id
+                    WHERE t.user_id = @userId
+                      AND a.include_in_overview = TRUE
+                      AND t.type = 'expense'
+                      AND NOT t.is_card_payment
+                      AND t.occurred_on >= @monthStart
+                      AND t.occurred_on < @monthEnd
                     UNION ALL
                     SELECT ct.category_id,
                         CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END AS signed_cents
@@ -591,19 +648,24 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
         await using var command = dataSource.CreateCommand("""
             WITH combined AS (
-                SELECT category_id, amount_cents AS signed_cents
-                FROM transactions
-                WHERE user_id = @userId
-                  AND type = 'expense'
-                  AND NOT is_card_payment
-                  AND occurred_on >= @monthStart
-                  AND occurred_on < @monthEnd
+                SELECT t.category_id, t.amount_cents AS signed_cents
+                FROM transactions t
+                JOIN accounts a ON a.id = t.account_id
+                WHERE t.user_id = @userId
+                  AND a.include_in_overview = TRUE
+                  AND t.type = 'expense'
+                  AND NOT t.is_card_payment
+                  AND t.occurred_on >= @monthStart
+                  AND t.occurred_on < @monthEnd
                 UNION ALL
-                SELECT category_id,
-                    CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END AS signed_cents
-                FROM card_transactions
-                WHERE user_id = @userId
-                  AND billing_month = @month
+                SELECT ct.category_id,
+                    CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END AS signed_cents
+                FROM card_transactions ct
+                JOIN cards cr ON cr.id = ct.card_id
+                LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
+                WHERE ct.user_id = @userId
+                  AND (ca.id IS NULL OR ca.include_in_overview = TRUE)
+                  AND ct.billing_month = @month
             )
             SELECT combined.category_id,
                    COALESCE(c.name, 'Sem categoria'),

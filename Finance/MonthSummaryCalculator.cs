@@ -48,9 +48,13 @@ public static class MonthSummaryCalculator
     {
         var list = new List<(Guid CardId, string BillingMonth)>();
         await using var cmd = dataSource.CreateCommand("""
-            SELECT id, closing_day
-            FROM cards
-            WHERE user_id = @userId AND kind = 'credit' AND is_archived = FALSE
+            SELECT c.id, c.closing_day
+            FROM cards c
+            LEFT JOIN accounts a ON a.id = COALESCE(c.linked_account_id, c.default_payment_account_id)
+            WHERE c.user_id = @userId
+              AND c.kind = 'credit'
+              AND c.is_archived = FALSE
+              AND (a.id IS NULL OR a.include_in_overview = TRUE)
             """);
         cmd.Parameters.AddWithValue("userId", userId);
 
@@ -77,14 +81,16 @@ public static class MonthSummaryCalculator
     {
         await using var cmd = dataSource.CreateCommand("""
             SELECT
-                COALESCE(SUM(CASE WHEN type = 'income' THEN amount_cents ELSE 0 END), 0)::BIGINT,
-                COALESCE(SUM(CASE WHEN type = 'expense' THEN amount_cents ELSE 0 END), 0)::BIGINT
-            FROM transactions
-            WHERE user_id = @userId
-              AND type IN ('income', 'expense')
-              AND NOT is_card_payment
-              AND occurred_on >= @monthStart
-              AND occurred_on < @monthEnd
+                COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount_cents ELSE 0 END), 0)::BIGINT,
+                COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount_cents ELSE 0 END), 0)::BIGINT
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            WHERE t.user_id = @userId
+              AND a.include_in_overview = TRUE
+              AND t.type IN ('income', 'expense')
+              AND NOT t.is_card_payment
+              AND t.occurred_on >= @monthStart
+              AND t.occurred_on < @monthEnd
             """);
         cmd.Parameters.AddWithValue("userId", userId);
         cmd.Parameters.AddWithValue("monthStart", monthStart);
@@ -146,19 +152,28 @@ public static class MonthSummaryCalculator
         }
 
         await using var command = dataSource.CreateCommand("""
-            WITH tx_by_card AS (
-                SELECT card_id,
-                       COALESCE(SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END), 0)::BIGINT AS total_cents
-                FROM card_transactions
-                WHERE user_id = @userId AND billing_month = @month
-                GROUP BY card_id
+            WITH visible_cards AS (
+                SELECT c.id
+                FROM cards c
+                LEFT JOIN accounts a ON a.id = COALESCE(c.linked_account_id, c.default_payment_account_id)
+                WHERE c.user_id = @userId
+                  AND (a.id IS NULL OR a.include_in_overview = TRUE)
+            ),
+            tx_by_card AS (
+                SELECT ct.card_id,
+                       COALESCE(SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END), 0)::BIGINT AS total_cents
+                FROM card_transactions ct
+                JOIN visible_cards vc ON vc.id = ct.card_id
+                WHERE ct.user_id = @userId AND ct.billing_month = @month
+                GROUP BY ct.card_id
             ),
             paid_by_card AS (
-                SELECT card_id,
-                       COALESCE(SUM(paid_amount_cents), 0)::BIGINT AS paid_cents
-                FROM card_invoices
-                WHERE user_id = @userId AND billing_month = @month
-                GROUP BY card_id
+                SELECT ci.card_id,
+                       COALESCE(SUM(ci.paid_amount_cents), 0)::BIGINT AS paid_cents
+                FROM card_invoices ci
+                JOIN visible_cards vc ON vc.id = ci.card_id
+                WHERE ci.user_id = @userId AND ci.billing_month = @month
+                GROUP BY ci.card_id
             )
             SELECT
                 COALESCE(SUM(GREATEST(0, t.total_cents)), 0)::BIGINT,

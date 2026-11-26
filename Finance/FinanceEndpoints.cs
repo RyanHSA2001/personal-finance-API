@@ -47,6 +47,16 @@ public static class FinanceEndpoints
             return Results.Created($"/accounts/{id}", new { id });
         });
 
+        group.MapPatch("/{id:guid}/overview-visibility", async (
+            Guid id,
+            AccountOverviewVisibilityRequest request,
+            ClaimsPrincipal principal,
+            IFinanceStore store,
+            CancellationToken ct) =>
+            await store.SetAccountOverviewVisibilityAsync(principal.GetUserId(), id, request.IncludeInOverview, ct)
+                ? Results.NoContent()
+                : Results.NotFound());
+
         group.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, IFinanceStore store, CancellationToken ct) =>
             await store.DeleteAccountAsync(principal.GetUserId(), id, ct)
                 ? Results.NoContent()

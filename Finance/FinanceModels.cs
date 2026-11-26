@@ -4,13 +4,16 @@ namespace PersonalControl.Api.Finance;
 
 public record AccountRequest(string Name, string Kind, long InitialBalanceCents);
 
+public record AccountOverviewVisibilityRequest(bool IncludeInOverview);
+
 public record AccountDto(
     Guid Id,
     string Name,
     string Kind,
     long InitialBalanceCents,
     long BalanceCents,
-    long ProjectedBalanceCents);
+    long ProjectedBalanceCents,
+    bool IncludeInOverview = true);
 
 public record CategoryRequest(string Name, string Kind, string? Color);
 
