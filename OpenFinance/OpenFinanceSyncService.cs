@@ -287,15 +287,49 @@ public class OpenFinanceSyncService(
         }
     }
 
-    // Usado pelo webhook do Pluggy: localiza o item já vinculado no banco e puxa dados autenticados direto da API Pluggy.
+    // Verifica antes de aceitar um webhook se existe vínculo ativo E credenciais configuradas para o item.
+    public async Task<bool> HasActiveConfiguredItemAsync(string pluggyItemId, CancellationToken ct = default)
+    {
+        var sql = _serverOptions.IsConfigured
+            ? """
+              SELECT EXISTS (
+                  SELECT 1
+                  FROM pluggy_items
+                  WHERE pluggy_item_id = @pluggyItemId
+              )
+              """
+            : """
+              SELECT EXISTS (
+                  SELECT 1
+                  FROM pluggy_items pi
+                  INNER JOIN user_pluggy_credentials c ON c.user_id = pi.user_id
+                  WHERE pi.pluggy_item_id = @pluggyItemId
+              )
+              """;
+
+        await using var cmd = dataSource.CreateCommand(sql);
+        cmd.Parameters.AddWithValue("pluggyItemId", pluggyItemId.Trim());
+        return Convert.ToBoolean(await cmd.ExecuteScalarAsync(ct));
+    }
+
+    // Usado pelo webhook do Pluggy: localiza o item já vinculado no banco (com credenciais ativas) e puxa dados direto da API Pluggy.
     public async Task<int> SyncByPluggyItemIdAsync(string pluggyItemId, int days, CancellationToken ct = default)
     {
         var targets = new List<(Guid UserId, Guid ItemRowId)>();
-        await using (var cmd = dataSource.CreateCommand("""
-            SELECT user_id, id
-            FROM pluggy_items
-            WHERE pluggy_item_id = @pluggyItemId
-            """))
+        var sql = _serverOptions.IsConfigured
+            ? """
+              SELECT user_id, id
+              FROM pluggy_items
+              WHERE pluggy_item_id = @pluggyItemId
+              """
+            : """
+              SELECT pi.user_id, pi.id
+              FROM pluggy_items pi
+              INNER JOIN user_pluggy_credentials c ON c.user_id = pi.user_id
+              WHERE pi.pluggy_item_id = @pluggyItemId
+              """;
+
+        await using (var cmd = dataSource.CreateCommand(sql))
         {
             cmd.Parameters.AddWithValue("pluggyItemId", pluggyItemId.Trim());
             await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -316,11 +350,20 @@ public class OpenFinanceSyncService(
     public async Task<IReadOnlyList<PluggySyncTarget>> ListAllSyncTargetsAsync(CancellationToken ct = default)
     {
         var list = new List<PluggySyncTarget>();
-        await using var cmd = dataSource.CreateCommand("""
-            SELECT user_id, id, pluggy_item_id
-            FROM pluggy_items
-            ORDER BY last_synced_at ASC NULLS FIRST
-            """);
+        var sql = _serverOptions.IsConfigured
+            ? """
+              SELECT user_id, id, pluggy_item_id
+              FROM pluggy_items
+              ORDER BY last_synced_at ASC NULLS FIRST
+              """
+            : """
+              SELECT pi.user_id, pi.id, pi.pluggy_item_id
+              FROM pluggy_items pi
+              INNER JOIN user_pluggy_credentials c ON c.user_id = pi.user_id
+              ORDER BY pi.last_synced_at ASC NULLS FIRST
+              """;
+
+        await using var cmd = dataSource.CreateCommand(sql);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

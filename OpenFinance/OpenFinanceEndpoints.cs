@@ -22,12 +22,14 @@ public static class OpenFinanceEndpoints
     public static IEndpointRouteBuilder MapOpenFinanceEndpoints(this IEndpointRouteBuilder app)
     {
         // Webhook público chamado pelo Pluggy quando um banco termina de atualizar.
-        // Não confia nos dados do payload: apenas enfileira o itemId já vinculado para busca autenticada na API Pluggy.
-        app.MapPost("/open-finance/webhook", (
+        // Só aceita se o itemId estiver vinculado no banco E o usuário tiver credenciais Pluggy ativas.
+        app.MapPost("/open-finance/webhook", async (
             HttpContext httpContext,
             PluggyWebhookPayload? payload,
             IOptions<PluggyOptions> options,
-            OpenFinanceAutoSyncWorker worker) =>
+            OpenFinanceSyncService syncService,
+            OpenFinanceAutoSyncWorker worker,
+            CancellationToken ct) =>
         {
             var expectedSecret = options.Value.WebhookSecret?.Trim();
             if (!string.IsNullOrEmpty(expectedSecret))
@@ -47,6 +49,9 @@ public static class OpenFinanceEndpoints
 
             if (!string.IsNullOrEmpty(eventName) && !SyncEvents.Contains(eventName))
                 return Results.Ok(new { ignored = true, eventName });
+
+            if (!await syncService.HasActiveConfiguredItemAsync(itemId, ct))
+                return Results.NotFound(new { error = "Nenhuma conexão ativa com credenciais configuradas para este item." });
 
             worker.EnqueueWebhookSync(itemId);
             return Results.Accepted(value: new { queued = true, itemId });
