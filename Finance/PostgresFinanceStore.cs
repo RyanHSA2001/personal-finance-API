@@ -30,20 +30,30 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
 
     public async Task<IReadOnlyList<AccountDto>> ListAccountsAsync(Guid userId, CancellationToken ct = default)
     {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(-3));
+
         await using var command = dataSource.CreateCommand("""
             SELECT a.id, a.name, a.kind, a.initial_balance_cents,
+                (a.initial_balance_cents
+                + COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
+                            WHERE t.account_id = a.id AND t.type = 'income' AND t.occurred_on <= @today), 0)
+                - COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
+                            WHERE t.account_id = a.id AND t.type IN ('expense', 'transfer') AND t.occurred_on <= @today), 0)
+                + COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
+                            WHERE t.transfer_account_id = a.id AND t.occurred_on <= @today), 0))::BIGINT AS balance,
                 (a.initial_balance_cents
                 + COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
                             WHERE t.account_id = a.id AND t.type = 'income'), 0)
                 - COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
                             WHERE t.account_id = a.id AND t.type IN ('expense', 'transfer')), 0)
                 + COALESCE((SELECT SUM(t.amount_cents)::BIGINT FROM transactions t
-                            WHERE t.transfer_account_id = a.id), 0))::BIGINT AS balance
+                            WHERE t.transfer_account_id = a.id), 0))::BIGINT AS projected_balance
             FROM accounts a
             WHERE a.user_id = @userId
             ORDER BY a.name
             """);
         command.Parameters.AddWithValue("userId", userId);
+        command.Parameters.AddWithValue("today", today);
 
         var accounts = new List<AccountDto>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -54,7 +64,8 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.GetInt64(3),
-                reader.GetInt64(4)));
+                reader.GetInt64(4),
+                reader.GetInt64(5)));
         }
 
         return accounts;
@@ -423,6 +434,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
     {
         var accounts = await ListAccountsAsync(userId, ct);
         var totalBalance = accounts.Sum(a => a.BalanceCents);
+        var projectedBalance = accounts.Sum(a => a.ProjectedBalanceCents);
 
         var (monthStart, monthEnd) = MonthBounds(month);
         var firstMonth = monthStart.AddMonths(-5);
@@ -437,6 +449,7 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         return new DashboardDto(
             Month: month,
             TotalBalanceCents: totalBalance,
+            ProjectedBalanceCents: projectedBalance,
             MonthIncomeCents: current.IncomeCents,
             MonthExpenseCents: current.ExpenseCents,
             MonthNetCents: current.IncomeCents - current.ExpenseCents,

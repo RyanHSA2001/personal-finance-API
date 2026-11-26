@@ -4,7 +4,13 @@ namespace PersonalControl.Api.Finance;
 
 public record AccountRequest(string Name, string Kind, long InitialBalanceCents);
 
-public record AccountDto(Guid Id, string Name, string Kind, long InitialBalanceCents, long BalanceCents);
+public record AccountDto(
+    Guid Id,
+    string Name,
+    string Kind,
+    long InitialBalanceCents,
+    long BalanceCents,
+    long ProjectedBalanceCents);
 
 public record CategoryRequest(string Name, string Kind, string? Color);
 
@@ -51,6 +57,7 @@ public record MonthTrendDto(string Month, long IncomeCents, long ExpenseCents);
 public record DashboardDto(
     string Month,
     long TotalBalanceCents,
+    long ProjectedBalanceCents,
     long MonthIncomeCents,
     long MonthExpenseCents,
     long MonthNetCents,
