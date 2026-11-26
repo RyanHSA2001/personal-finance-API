@@ -1,10 +1,7 @@
 using System.Security.Claims;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.Extensions.Options;
 
 namespace PersonalControl.Api.Auth;
 
@@ -13,9 +10,6 @@ public static class AuthEndpoints
     public const string RefreshCookieName = "pc_refresh";
     public const string StrictRateLimitPolicy = "auth-strict";
     public const string RefreshRateLimitPolicy = "auth-refresh";
-
-    // Id fixo do acesso coringa, para que o token sempre identifique o mesmo "usuário".
-    private static readonly Guid WildcardUserId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
     private static readonly Regex EmailPattern = new(@"^[^\s@]+@[^\s@]+\.[^\s@]+$");
 
@@ -30,35 +24,22 @@ public static class AuthEndpoints
             ISessionStore sessions,
             IPasswordHasher<User> hasher,
             JwtTokenService tokens,
-            IOptions<WildcardAccessOptions> wildcard,
             CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
                 return Results.BadRequest(new { error = "Email e senha são obrigatórios." });
 
-            User? authenticatedUser;
+            var user = await users.FindByEmailAsync(request.Email.Trim(), cancellationToken);
 
-            // Acesso coringa (temporário): entra direto, sem consultar o banco de usuários.
-            if (IsWildcardLogin(request, wildcard.Value))
-            {
-                authenticatedUser = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty, IsAdmin: true);
-            }
-            else
-            {
-                var user = await users.FindByEmailAsync(request.Email.Trim(), cancellationToken);
+            // Mesma resposta para "usuário não existe" e "senha errada" (evita enumeração de usuários).
+            if (user is null)
+                return Results.Unauthorized();
 
-                // Mesma resposta para "usuário não existe" e "senha errada" (evita enumeração de usuários).
-                if (user is null)
-                    return Results.Unauthorized();
+            var result = hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
+            if (result == PasswordVerificationResult.Failed)
+                return Results.Unauthorized();
 
-                var result = hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
-                if (result == PasswordVerificationResult.Failed)
-                    return Results.Unauthorized();
-
-                authenticatedUser = user;
-            }
-
-            var response = await IssueNewSessionAsync(httpContext, authenticatedUser, sessions, tokens, cancellationToken);
+            var response = await IssueNewSessionAsync(httpContext, user, sessions, tokens, cancellationToken);
             return Results.Ok(response);
         })
         .WithName("Login")
@@ -121,7 +102,6 @@ public static class AuthEndpoints
             IUserStore users,
             ISessionStore sessions,
             JwtTokenService tokens,
-            IOptions<WildcardAccessOptions> wildcard,
             CancellationToken cancellationToken) =>
         {
             if (!httpContext.Request.Cookies.TryGetValue(RefreshCookieName, out var rawToken) ||
@@ -154,16 +134,7 @@ public static class AuthEndpoints
                 return Results.Unauthorized();
             }
 
-            User? user;
-            if (existing.UserId == WildcardUserId && wildcard.Value.IsEnabled)
-            {
-                user = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty, IsAdmin: true);
-            }
-            else
-            {
-                user = await users.FindByIdAsync(existing.UserId, cancellationToken);
-            }
-
+            var user = await users.FindByIdAsync(existing.UserId, cancellationToken);
             if (user is null)
             {
                 await sessions.RevokeFamilyAsync(existing.FamilyId, cancellationToken);
@@ -370,19 +341,6 @@ public static class AuthEndpoints
 
     private static bool TryGetSessionId(ClaimsPrincipal principal, out Guid sessionId) =>
         Guid.TryParse(principal.FindFirstValue(JwtTokenService.SessionIdClaimType), out sessionId);
-
-    private static bool IsWildcardLogin(LoginRequest request, WildcardAccessOptions wildcard)
-    {
-        if (!wildcard.IsEnabled)
-            return false;
-
-        var emailMatches = string.Equals(request.Email.Trim(), wildcard.Email, StringComparison.OrdinalIgnoreCase);
-        var passwordMatches = CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(request.Password),
-            Encoding.UTF8.GetBytes(wildcard.Password));
-
-        return emailMatches && passwordMatches;
-    }
 
     // Retorna a mensagem de erro, ou null quando os dados são válidos.
     private static string? ValidateRegistration(RegisterRequest request)

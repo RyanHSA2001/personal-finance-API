@@ -64,9 +64,6 @@ var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOp
 if (string.IsNullOrWhiteSpace(jwt.Key) || jwt.Key.Length < 32)
     throw new InvalidOperationException("Jwt:Key precisa ser configurada com pelo menos 32 caracteres.");
 
-// Acesso coringa temporário (seção "WildcardAccess")
-builder.Services.Configure<WildcardAccessOptions>(builder.Configuration.GetSection("WildcardAccess"));
-
 // Banco PostgreSQL: conecta via Npgsql e aplica as migrações pendentes na inicialização.
 builder.Services.AddDataAccess(builder.Configuration);
 
