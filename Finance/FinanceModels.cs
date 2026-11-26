@@ -73,7 +73,8 @@ public record OfxPreviewTransactionDto(
     string Description,
     string OccurredOn,
     string OfxType,
-    bool AlreadyImported);
+    bool AlreadyImported,
+    Guid? SuggestedCategoryId = null);
 
 public record OfxPreviewDto(
     string? BankId,

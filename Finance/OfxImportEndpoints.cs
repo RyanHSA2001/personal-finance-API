@@ -25,23 +25,28 @@ public static partial class OfxImportEndpoints
             Guid? accountId,
             ClaimsPrincipal principal,
             IFinanceStore store,
+            IRecurringStore recurringStore,
             CancellationToken ct) =>
         {
             if (file is null || file.Length == 0)
-                return Results.BadRequest(new { error = "Envie um arquivo OFX." });
+                return Results.BadRequest(new { error = "Envie um arquivo OFX ou CSV." });
 
             if (file.Length > MaxFileBytes)
-                return Results.BadRequest(new { error = "O arquivo OFX pode ter no máximo 5 MB." });
+                return Results.BadRequest(new { error = "O arquivo pode ter no máximo 5 MB." });
 
             var userId = principal.GetUserId();
             if (accountId is not null && !await store.AccountBelongsToAsync(userId, accountId.Value, ct))
                 return Results.BadRequest(new { error = "Conta não encontrada." });
 
+            var isCsv = file.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
+
             IReadOnlyList<OfxStatement> statements;
             try
             {
                 await using var stream = file.OpenReadStream();
-                statements = await OfxParser.ParseAsync(stream, ct);
+                statements = isCsv
+                    ? await CsvStatementParser.ParseAsync(stream, ct)
+                    : await OfxParser.ParseAsync(stream, ct);
             }
             catch (OfxParseException ex)
             {
@@ -49,6 +54,20 @@ public static partial class OfxImportEndpoints
             }
 
             var items = BuildPreviewItems(statements);
+
+            // Auto-categorização inteligente baseada no histórico de lançamentos do próprio usuário.
+            if (items.Count > 0)
+            {
+                var expenseHints = await recurringStore.GetCategorySuggestionsAsync(userId, "expense", ct);
+                var incomeHints = await recurringStore.GetCategorySuggestionsAsync(userId, "income", ct);
+
+                items = items.Select(item =>
+                {
+                    var hints = item.Type == "income" ? incomeHints : expenseHints;
+                    var suggested = SuggestCategory(item.Description, hints);
+                    return suggested.HasValue ? item with { SuggestedCategoryId = suggested } : item;
+                }).ToList();
+            }
 
             if (accountId is not null && items.Count > 0)
             {
@@ -159,6 +178,29 @@ public static partial class OfxImportEndpoints
 
     private static string Normalize(string? value) =>
         value is null ? string.Empty : Whitespace().Replace(value, " ").Trim();
+
+    private static Guid? SuggestCategory(string description, Dictionary<string, Guid> hints)
+    {
+        if (hints.Count == 0 || string.IsNullOrWhiteSpace(description))
+            return null;
+
+        var norm = description.Trim().ToLowerInvariant();
+        if (hints.TryGetValue(norm, out var exact))
+            return exact;
+
+        // Tenta casar pelo primeiro termo significativo (>= 4 caracteres, ex.: "uber", "ifood", "spotify").
+        var firstWord = norm.Split([' ', '-', '*', '/'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (firstWord is not null && firstWord.Length >= 4)
+        {
+            foreach (var (key, catId) in hints)
+            {
+                if (key.Contains(firstWord, StringComparison.OrdinalIgnoreCase))
+                    return catId;
+            }
+        }
+
+        return null;
+    }
 
     private static string? FormatDate(DateOnly? date) =>
         date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);

@@ -136,6 +136,7 @@ app.UseAuthorization();
 app.MapAuthEndpoints();
 app.MapAdminEndpoints();
 app.MapFinanceEndpoints();
+app.MapRecurringEndpoints();
 app.MapCardEndpoints();
 app.MapGoalEndpoints();
 app.MapOpenFinanceEndpoints();

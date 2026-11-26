@@ -30,6 +30,7 @@ public static class DataAccessExtensions
         services.AddSingleton<ISessionStore, PostgresSessionStore>();
         services.AddSingleton<IAllowedEmailStore, PostgresAllowedEmailStore>();
         services.AddSingleton<IFinanceStore, PostgresFinanceStore>();
+        services.AddSingleton<IRecurringStore, PostgresRecurringStore>();
         services.AddSingleton<ICardStore, PostgresCardStore>();
         services.AddSingleton<IGoalStore, PostgresGoalStore>();
         return services;

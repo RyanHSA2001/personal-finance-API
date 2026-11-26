@@ -44,6 +44,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 9)
             ApplyMigration9(connection);
+
+        if (currentVersion < 10)
+            ApplyMigration10(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -383,6 +386,32 @@ public static class PostgresDatabase
             );
 
             INSERT INTO schema_migrations (version) VALUES (9)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Lançamentos recorrentes (contas fixas mensais: salário, aluguel, internet, streaming, etc.).
+    private static void ApplyMigration10(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            CREATE TABLE IF NOT EXISTS recurring_transactions (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+                amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+                day_of_month SMALLINT NOT NULL CHECK (day_of_month BETWEEN 1 AND 31),
+                account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                category_id UUID NULL REFERENCES categories(id) ON DELETE SET NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_recurring_user_id ON recurring_transactions (user_id, day_of_month);
+
+            INSERT INTO schema_migrations (version) VALUES (10)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();
