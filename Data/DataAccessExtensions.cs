@@ -3,6 +3,7 @@ using PersonalControl.Api.Auth;
 using PersonalControl.Api.Cards;
 using PersonalControl.Api.Data.PostgreSql;
 using PersonalControl.Api.Finance;
+using PersonalControl.Api.Goals;
 
 namespace PersonalControl.Api.Data;
 
@@ -30,6 +31,7 @@ public static class DataAccessExtensions
         services.AddSingleton<IAllowedEmailStore, PostgresAllowedEmailStore>();
         services.AddSingleton<IFinanceStore, PostgresFinanceStore>();
         services.AddSingleton<ICardStore, PostgresCardStore>();
+        services.AddSingleton<IGoalStore, PostgresGoalStore>();
         return services;
     }
 }

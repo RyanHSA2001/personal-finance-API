@@ -8,6 +8,7 @@ using PersonalControl.Api.Auth;
 using PersonalControl.Api.Cards;
 using PersonalControl.Api.Data;
 using PersonalControl.Api.Finance;
+using PersonalControl.Api.Goals;
 using PersonalControl.Api.OpenFinance;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -124,6 +125,7 @@ app.MapAuthEndpoints();
 app.MapAdminEndpoints();
 app.MapFinanceEndpoints();
 app.MapCardEndpoints();
+app.MapGoalEndpoints();
 app.MapOpenFinanceEndpoints();
 
 app.Run();

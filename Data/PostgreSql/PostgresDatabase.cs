@@ -41,6 +41,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 8)
             ApplyMigration8(connection);
+
+        if (currentVersion < 9)
+            ApplyMigration9(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -348,6 +351,38 @@ public static class PostgresDatabase
                 ON allowed_emails (LOWER(email));
 
             INSERT INTO schema_migrations (version) VALUES (8)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Metas financeiras (economia mensal ou caixinha com valor-alvo) e orçamento diário (streak).
+    private static void ApplyMigration9(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            CREATE TABLE IF NOT EXISTS goals (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('monthly_savings', 'target')),
+                target_cents BIGINT NOT NULL CHECK (target_cents > 0),
+                current_cents BIGINT NOT NULL DEFAULT 0 CHECK (current_cents >= 0),
+                deadline DATE NULL,
+                color TEXT NOT NULL DEFAULT '#a78bfa',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_goals_user_id ON goals (user_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS daily_budget_settings (
+                user_id UUID PRIMARY KEY,
+                daily_limit_cents BIGINT NOT NULL CHECK (daily_limit_cents > 0),
+                include_card_purchases BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            INSERT INTO schema_migrations (version) VALUES (9)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();
