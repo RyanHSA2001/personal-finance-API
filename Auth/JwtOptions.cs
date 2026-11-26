@@ -10,5 +10,9 @@ public class JwtOptions
     // Em produção, defina por variável de ambiente (Jwt__Key) ou user-secrets.
     public string Key { get; set; } = string.Empty;
 
-    public int ExpiresMinutes { get; set; } = 60;
+    // Validade curta do access token (JWT em memória no front).
+    public int ExpiresMinutes { get; set; } = 15;
+
+    // Validade da sessão via refresh token (cookie HttpOnly).
+    public int RefreshTokenDays { get; set; } = 30;
 }

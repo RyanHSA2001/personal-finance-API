@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -8,17 +9,22 @@ namespace PersonalControl.Api.Auth;
 
 public class JwtTokenService(IOptions<JwtOptions> options)
 {
+    public const string SessionIdClaimType = "sid";
+
     private readonly JwtOptions _options = options.Value;
 
-    public LoginResponse CreateToken(User user)
+    public int RefreshTokenDays => Math.Max(1, _options.RefreshTokenDays);
+
+    public LoginResponse CreateToken(User user, Guid sessionId)
     {
-        var expiresAt = DateTime.UtcNow.AddMinutes(_options.ExpiresMinutes);
+        var expiresAt = DateTime.UtcNow.AddMinutes(Math.Max(1, _options.ExpiresMinutes));
 
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim(JwtRegisteredClaimNames.Email, user.Email),
             new Claim(ClaimTypes.Name, user.Name),
+            new Claim(SessionIdClaimType, sessionId.ToString()),
         };
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.Key));
@@ -32,6 +38,21 @@ public class JwtTokenService(IOptions<JwtOptions> options)
             signingCredentials: credentials);
 
         var accessToken = new JwtSecurityTokenHandler().WriteToken(token);
-        return new LoginResponse(accessToken, expiresAt);
+        return new LoginResponse(accessToken, expiresAt, sessionId);
+    }
+
+    // Gera um refresh token opaco com 256 bits de entropia (Base64Url).
+    public static string GenerateRefreshToken()
+    {
+        Span<byte> bytes = stackalloc byte[32];
+        RandomNumberGenerator.Fill(bytes);
+        return Base64UrlEncoder.Encode(bytes.ToArray());
+    }
+
+    // Calcula o hash SHA-256 em hexadecimal para armazenar no banco (nunca salvamos o token em texto puro).
+    public static string HashRefreshToken(string rawToken)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+        return Convert.ToHexString(bytes);
     }
 }

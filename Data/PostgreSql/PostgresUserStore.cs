@@ -27,6 +27,27 @@ public class PostgresUserStore(NpgsqlDataSource dataSource) : IUserStore
             reader.GetString(3));
     }
 
+    public async Task<User?> FindByIdAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand("""
+            SELECT id, email, name, password_hash
+            FROM users
+            WHERE id = @id
+            LIMIT 1
+            """);
+        command.Parameters.AddWithValue("id", id);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+
+        return new User(
+            reader.GetGuid(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3));
+    }
+
     public async Task<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         await using var command = dataSource.CreateCommand("SELECT EXISTS (SELECT 1 FROM users)");

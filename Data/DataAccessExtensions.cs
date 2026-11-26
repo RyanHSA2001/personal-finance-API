@@ -26,6 +26,7 @@ public static class DataAccessExtensions
 
         services.AddSingleton(dataSource);
         services.AddSingleton<IUserStore, PostgresUserStore>();
+        services.AddSingleton<ISessionStore, PostgresSessionStore>();
         services.AddSingleton<IFinanceStore, PostgresFinanceStore>();
         services.AddSingleton<ICardStore, PostgresCardStore>();
         return services;

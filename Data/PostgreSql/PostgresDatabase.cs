@@ -35,6 +35,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 6)
             ApplyMigration6(connection);
+
+        if (currentVersion < 7)
+            ApplyMigration7(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -280,6 +283,35 @@ public static class PostgresDatabase
             );
 
             INSERT INTO schema_migrations (version) VALUES (6)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Sessões de usuário com refresh token opaco (hash SHA-256), rotação e detecção de reuso por família.
+    private static void ApplyMigration7(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL,
+                family_id UUID NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_agent TEXT NOT NULL DEFAULT '',
+                ip_address TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                revoked_at TIMESTAMPTZ NULL,
+                replaced_by_session_id UUID NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_family_id ON user_sessions (family_id);
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions (expires_at);
+
+            INSERT INTO schema_migrations (version) VALUES (7)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();
