@@ -718,13 +718,14 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
         command.Parameters.AddWithValue("isArchived", request.IsArchived);
     }
 
-    // Regra de fechamento: compras até o dia de fechamento entram na fatura do próprio mês;
-    // após o dia de fechamento entram na fatura do mês seguinte.
+    // Regra de fechamento: a fatura fecha na virada para o dia de fechamento (ex.: dia 14 às 00:00).
+    // Compras antes do dia de fechamento entram na fatura do mês atual;
+    // compras a partir do dia de fechamento (melhor dia de compra) entram na fatura do mês seguinte.
     public static string ResolveBillingMonth(DateOnly date, int closingDay)
     {
         var daysInMonth = DateTime.DaysInMonth(date.Year, date.Month);
         var effectiveClosing = Math.Min(closingDay, daysInMonth);
-        var target = date.Day <= effectiveClosing
+        var target = date.Day < effectiveClosing
             ? new DateOnly(date.Year, date.Month, 1)
             : new DateOnly(date.Year, date.Month, 1).AddMonths(1);
 
@@ -757,7 +758,7 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
         if (today > dueDate && totalCents > 0)
             return "overdue";
 
-        if (today > closingDate)
+        if (today >= closingDate)
             return "closed";
 
         return "open";
