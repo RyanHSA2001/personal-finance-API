@@ -455,14 +455,25 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
         CancellationToken ct)
     {
         await using var command = dataSource.CreateCommand("""
+            WITH tx_by_card AS (
+                SELECT card_id,
+                       COALESCE(SUM(CASE WHEN type = 'purchase' THEN amount_cents ELSE -amount_cents END), 0)::BIGINT AS total_cents
+                FROM card_transactions
+                WHERE user_id = @userId AND billing_month = @month
+                GROUP BY card_id
+            ),
+            paid_by_card AS (
+                SELECT card_id,
+                       COALESCE(SUM(paid_amount_cents), 0)::BIGINT AS paid_cents
+                FROM card_invoices
+                WHERE user_id = @userId AND billing_month = @month
+                GROUP BY card_id
+            )
             SELECT
-                COALESCE(SUM(CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END), 0)::BIGINT,
-                COALESCE(SUM(CASE WHEN ci.id IS NULL THEN
-                    (CASE WHEN ct.type = 'purchase' THEN ct.amount_cents ELSE -ct.amount_cents END)
-                ELSE 0 END), 0)::BIGINT
-            FROM card_transactions ct
-            LEFT JOIN card_invoices ci ON ci.card_id = ct.card_id AND ci.billing_month = ct.billing_month
-            WHERE ct.user_id = @userId AND ct.billing_month = @month
+                COALESCE(SUM(GREATEST(0, t.total_cents)), 0)::BIGINT,
+                COALESCE(SUM(GREATEST(0, t.total_cents - COALESCE(p.paid_cents, 0))), 0)::BIGINT
+            FROM tx_by_card t
+            LEFT JOIN paid_by_card p ON p.card_id = t.card_id
             """);
         command.Parameters.AddWithValue("userId", userId);
         command.Parameters.AddWithValue("month", month);

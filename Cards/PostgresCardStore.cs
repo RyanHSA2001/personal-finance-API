@@ -764,7 +764,9 @@ public class PostgresCardStore(NpgsqlDataSource dataSource) : ICardStore
         await reader.ReadAsync(ct);
         var total = reader.GetInt64(0);
         var paid = reader.GetInt64(1);
-        return (total, total > 0 && paid >= total);
+        var isPaid = total > 0 && paid >= total;
+        var openAmount = isPaid ? total : Math.Max(0, total - paid);
+        return (openAmount, isPaid);
     }
 
     private static void BindCardParameters(NpgsqlCommand command, Guid id, Guid userId, CardRequest request)
