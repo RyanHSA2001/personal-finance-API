@@ -19,13 +19,16 @@ public class JwtTokenService(IOptions<JwtOptions> options)
     {
         var expiresAt = DateTime.UtcNow.AddMinutes(Math.Max(1, _options.ExpiresMinutes));
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.Email, user.Email),
-            new Claim(ClaimTypes.Name, user.Name),
-            new Claim(SessionIdClaimType, sessionId.ToString()),
+            new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new(JwtRegisteredClaimNames.Email, user.Email),
+            new(ClaimTypes.Name, user.Name),
+            new(SessionIdClaimType, sessionId.ToString()),
         };
+
+        if (user.IsAdmin)
+            claims.Add(new Claim(ClaimTypes.Role, AdminEndpoints.AdminRole));
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.Key));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -38,7 +41,7 @@ public class JwtTokenService(IOptions<JwtOptions> options)
             signingCredentials: credentials);
 
         var accessToken = new JwtSecurityTokenHandler().WriteToken(token);
-        return new LoginResponse(accessToken, expiresAt, sessionId);
+        return new LoginResponse(accessToken, expiresAt, sessionId, user.IsAdmin);
     }
 
     // Gera um refresh token opaco com 256 bits de entropia (Base64Url).

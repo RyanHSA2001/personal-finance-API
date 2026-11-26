@@ -41,7 +41,7 @@ public static class AuthEndpoints
             // Acesso coringa (temporário): entra direto, sem consultar o banco de usuários.
             if (IsWildcardLogin(request, wildcard.Value))
             {
-                authenticatedUser = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty);
+                authenticatedUser = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty, IsAdmin: true);
             }
             else
             {
@@ -74,11 +74,12 @@ public static class AuthEndpoints
         .WithName("SetupStatus")
         .AllowAnonymous();
 
-        // Cadastro de novo usuário. Cria a sessão e já devolve o access token + cookie HttpOnly.
+        // Cadastro de novo usuário. Só aceita e-mails autorizados pelo admin (exceto no primeiro acesso de um banco vazio).
         group.MapPost("/register", async (
             HttpContext httpContext,
             RegisterRequest request,
             IUserStore users,
+            IAllowedEmailStore allowedEmails,
             ISessionStore sessions,
             IPasswordHasher<User> hasher,
             JwtTokenService tokens,
@@ -88,7 +89,20 @@ public static class AuthEndpoints
             if (validationError is not null)
                 return Results.BadRequest(new { error = validationError });
 
-            var user = new User(Guid.NewGuid(), request.Email.Trim(), request.Name.Trim(), string.Empty);
+            var hasUsers = await users.AnyAsync(cancellationToken);
+            if (hasUsers && !await allowedEmails.IsAllowedAsync(request.Email, cancellationToken))
+            {
+                return Results.Json(
+                    new { error = "Este e-mail não está autorizado a criar conta. Solicite acesso ao administrador." },
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+
+            var user = new User(
+                Guid.NewGuid(),
+                request.Email.Trim(),
+                request.Name.Trim(),
+                string.Empty,
+                IsAdmin: !hasUsers);
             user = user with { PasswordHash = hasher.HashPassword(user, request.Password) };
 
             if (!await users.TryAddAsync(user, cancellationToken))
@@ -143,7 +157,7 @@ public static class AuthEndpoints
             User? user;
             if (existing.UserId == WildcardUserId && wildcard.Value.IsEnabled)
             {
-                user = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty);
+                user = new User(WildcardUserId, wildcard.Value.Email, wildcard.Value.Name, string.Empty, IsAdmin: true);
             }
             else
             {
@@ -285,6 +299,7 @@ public static class AuthEndpoints
             Email = principal.FindFirstValue(ClaimTypes.Email),
             Name = principal.FindFirstValue(ClaimTypes.Name),
             SessionId = principal.FindFirstValue(JwtTokenService.SessionIdClaimType),
+            IsAdmin = principal.IsInRole(AdminEndpoints.AdminRole),
         }))
         .WithName("Me")
         .RequireAuthorization();

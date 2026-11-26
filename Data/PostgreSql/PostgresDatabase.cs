@@ -38,6 +38,9 @@ public static class PostgresDatabase
 
         if (currentVersion < 7)
             ApplyMigration7(connection);
+
+        if (currentVersion < 8)
+            ApplyMigration8(connection);
     }
 
     private static int GetCurrentVersion(NpgsqlConnection connection)
@@ -312,6 +315,39 @@ public static class PostgresDatabase
             CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions (expires_at);
 
             INSERT INTO schema_migrations (version) VALUES (7)
+                ON CONFLICT (version) DO NOTHING;
+            """, transaction);
+        transaction.Commit();
+    }
+
+    // Controle de administrador e lista de e-mails autorizados para cadastro (allowlist).
+    private static void ApplyMigration8(NpgsqlConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, """
+            ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+
+            -- Promove automaticamente a primeira conta criada caso ainda não haja administrador.
+            UPDATE users
+            SET is_admin = TRUE
+            WHERE id = (
+                SELECT id FROM users ORDER BY created_at ASC LIMIT 1
+            )
+            AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = TRUE);
+
+            CREATE TABLE IF NOT EXISTS allowed_emails (
+                id UUID PRIMARY KEY,
+                email TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_by_user_id UUID NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_allowed_emails_lower
+                ON allowed_emails (LOWER(email));
+
+            INSERT INTO schema_migrations (version) VALUES (8)
                 ON CONFLICT (version) DO NOTHING;
             """, transaction);
         transaction.Commit();

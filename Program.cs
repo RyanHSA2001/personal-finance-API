@@ -101,7 +101,11 @@ builder.Services
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AdminEndpoints.AdminPolicy, policy =>
+        policy.RequireRole(AdminEndpoints.AdminRole));
+});
 
 var app = builder.Build();
 
@@ -120,6 +124,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapAuthEndpoints();
+app.MapAdminEndpoints();
 app.MapFinanceEndpoints();
 app.MapCardEndpoints();
 app.MapOpenFinanceEndpoints();

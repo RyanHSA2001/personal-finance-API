@@ -13,4 +13,7 @@ public interface IUserStore
 
     // Grava o usuário. Retorna false se já existir uma conta com o mesmo e-mail.
     Task<bool> TryAddAsync(User user, CancellationToken cancellationToken = default);
+
+    // Lista todos os usuários cadastrados (uso exclusivo do painel admin).
+    Task<IReadOnlyList<AdminUserSummary>> ListAllAsync(CancellationToken cancellationToken = default);
 }
