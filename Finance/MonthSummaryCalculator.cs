@@ -54,7 +54,17 @@ public static class MonthSummaryCalculator
             WHERE c.user_id = @userId
               AND c.kind = 'credit'
               AND c.is_archived = FALSE
-              AND (a.id IS NULL OR a.include_in_overview = TRUE)
+              AND (
+                a.include_in_overview = TRUE
+                OR (
+                  a.id IS NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM accounts acc_filter
+                    WHERE acc_filter.user_id = @userId
+                      AND acc_filter.include_in_overview = FALSE
+                  )
+                )
+              )
             """);
         cmd.Parameters.AddWithValue("userId", userId);
 
@@ -157,7 +167,17 @@ public static class MonthSummaryCalculator
                 FROM cards c
                 LEFT JOIN accounts a ON a.id = COALESCE(c.linked_account_id, c.default_payment_account_id)
                 WHERE c.user_id = @userId
-                  AND (a.id IS NULL OR a.include_in_overview = TRUE)
+                  AND (
+                    a.include_in_overview = TRUE
+                    OR (
+                      a.id IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM accounts acc_filter
+                        WHERE acc_filter.user_id = @userId
+                          AND acc_filter.include_in_overview = FALSE
+                      )
+                    )
+                  )
             ),
             tx_by_card AS (
                 SELECT ct.card_id,

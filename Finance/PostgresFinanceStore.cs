@@ -429,7 +429,18 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                                 LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
                                 WHERE ct.user_id = b.user_id
                                   AND ct.category_id = b.category_id
-                                  AND (@onlyOverview = FALSE OR ca.id IS NULL OR ca.include_in_overview = TRUE)
+                                  AND (
+                                    @onlyOverview = FALSE
+                                    OR ca.include_in_overview = TRUE
+                                    OR (
+                                      ca.id IS NULL
+                                      AND NOT EXISTS (
+                                        SELECT 1 FROM accounts acc_filter
+                                        WHERE acc_filter.user_id = b.user_id
+                                          AND acc_filter.include_in_overview = FALSE
+                                      )
+                                    )
+                                  )
                                   AND ct.billing_month = @month), 0)
                 )::BIGINT
             FROM budgets b
@@ -544,7 +555,17 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
             JOIN cards cr ON cr.id = ct.card_id
             LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
             WHERE ct.user_id = @userId
-              AND (ca.id IS NULL OR ca.include_in_overview = TRUE)
+              AND (
+                ca.include_in_overview = TRUE
+                OR (
+                  ca.id IS NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM accounts acc_filter
+                    WHERE acc_filter.user_id = @userId
+                      AND acc_filter.include_in_overview = FALSE
+                  )
+                )
+              )
               AND ct.billing_month >= @fromMonth
               AND ct.billing_month <= @toMonth
             GROUP BY 1
@@ -664,7 +685,17 @@ public class PostgresFinanceStore(NpgsqlDataSource dataSource) : IFinanceStore
                 JOIN cards cr ON cr.id = ct.card_id
                 LEFT JOIN accounts ca ON ca.id = COALESCE(cr.linked_account_id, cr.default_payment_account_id)
                 WHERE ct.user_id = @userId
-                  AND (ca.id IS NULL OR ca.include_in_overview = TRUE)
+                  AND (
+                    ca.include_in_overview = TRUE
+                    OR (
+                      ca.id IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM accounts acc_filter
+                        WHERE acc_filter.user_id = @userId
+                          AND acc_filter.include_in_overview = FALSE
+                      )
+                    )
+                  )
                   AND ct.billing_month = @month
             )
             SELECT combined.category_id,
