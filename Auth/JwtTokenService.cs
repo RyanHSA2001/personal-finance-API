@@ -15,7 +15,7 @@ public class JwtTokenService(IOptions<JwtOptions> options)
 
     public int RefreshTokenDays => Math.Max(1, _options.RefreshTokenDays);
 
-    public LoginResponse CreateToken(User user, Guid sessionId)
+    public LoginResponse CreateToken(User user, Guid sessionId, string? refreshToken = null)
     {
         var expiresAt = DateTime.UtcNow.AddMinutes(Math.Max(1, _options.ExpiresMinutes));
 
@@ -41,7 +41,7 @@ public class JwtTokenService(IOptions<JwtOptions> options)
             signingCredentials: credentials);
 
         var accessToken = new JwtSecurityTokenHandler().WriteToken(token);
-        return new LoginResponse(accessToken, expiresAt, sessionId, user.IsAdmin);
+        return new LoginResponse(accessToken, expiresAt, sessionId, user.IsAdmin, refreshToken);
     }
 
     // Gera um refresh token opaco com 256 bits de entropia (Base64Url).

@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
@@ -8,6 +9,7 @@ namespace PersonalControl.Api.Auth;
 public static class AuthEndpoints
 {
     public const string RefreshCookieName = "pc_refresh";
+    public const string ClientTypeHeader = "X-Client-Type";
     public const string StrictRateLimitPolicy = "auth-strict";
     public const string RefreshRateLimitPolicy = "auth-refresh";
 
@@ -96,7 +98,7 @@ public static class AuthEndpoints
         .AllowAnonymous()
         .RequireRateLimiting(StrictRateLimitPolicy);
 
-        // Renova o access token usando o cookie HttpOnly de refresh com rotação e detecção de reuso.
+        // Renova o access token usando o cookie HttpOnly (web) ou refreshToken no JSON (X-Client-Type: mobile).
         group.MapPost("/refresh", async (
             HttpContext httpContext,
             IUserStore users,
@@ -104,8 +106,9 @@ public static class AuthEndpoints
             JwtTokenService tokens,
             CancellationToken cancellationToken) =>
         {
-            if (!httpContext.Request.Cookies.TryGetValue(RefreshCookieName, out var rawToken) ||
-                string.IsNullOrWhiteSpace(rawToken))
+            var isMobile = IsMobileClient(httpContext);
+            var rawToken = await ReadRefreshTokenAsync(httpContext, isMobile, cancellationToken);
+            if (string.IsNullOrWhiteSpace(rawToken))
             {
                 return Results.Unauthorized();
             }
@@ -114,7 +117,7 @@ public static class AuthEndpoints
             var existing = await sessions.FindByTokenHashAsync(tokenHash, cancellationToken);
             if (existing is null)
             {
-                ClearRefreshCookie(httpContext);
+                if (!isMobile) ClearRefreshCookie(httpContext);
                 return Results.Unauthorized();
             }
 
@@ -122,7 +125,7 @@ public static class AuthEndpoints
             if (existing.RevokedAtUtc is not null)
             {
                 await sessions.RevokeFamilyAsync(existing.FamilyId, cancellationToken);
-                ClearRefreshCookie(httpContext);
+                if (!isMobile) ClearRefreshCookie(httpContext);
                 return Results.Unauthorized();
             }
 
@@ -130,7 +133,7 @@ public static class AuthEndpoints
             if (existing.ExpiresAtUtc <= now)
             {
                 await sessions.RevokeSessionAsync(existing.UserId, existing.Id, cancellationToken);
-                ClearRefreshCookie(httpContext);
+                if (!isMobile) ClearRefreshCookie(httpContext);
                 return Results.Unauthorized();
             }
 
@@ -138,7 +141,7 @@ public static class AuthEndpoints
             if (user is null)
             {
                 await sessions.RevokeFamilyAsync(existing.FamilyId, cancellationToken);
-                ClearRefreshCookie(httpContext);
+                if (!isMobile) ClearRefreshCookie(httpContext);
                 return Results.Unauthorized();
             }
 
@@ -158,9 +161,12 @@ public static class AuthEndpoints
             if (!rotated)
             {
                 await sessions.RevokeFamilyAsync(existing.FamilyId, cancellationToken);
-                ClearRefreshCookie(httpContext);
+                if (!isMobile) ClearRefreshCookie(httpContext);
                 return Results.Unauthorized();
             }
+
+            if (isMobile)
+                return Results.Ok(tokens.CreateToken(user, nextSession.Id, nextRawToken));
 
             SetRefreshCookie(httpContext, nextRawToken, nextSession.ExpiresAtUtc);
             return Results.Ok(tokens.CreateToken(user, nextSession.Id));
@@ -169,14 +175,15 @@ public static class AuthEndpoints
         .AllowAnonymous()
         .RequireRateLimiting(RefreshRateLimitPolicy);
 
-        // Logout real: revoga a sessão associada ao cookie de refresh no banco e apaga o cookie.
+        // Logout real: revoga a sessão associada ao refresh token (cookie web ou JSON mobile).
         group.MapPost("/logout", async (
             HttpContext httpContext,
             ISessionStore sessions,
             CancellationToken cancellationToken) =>
         {
-            if (httpContext.Request.Cookies.TryGetValue(RefreshCookieName, out var rawToken) &&
-                !string.IsNullOrWhiteSpace(rawToken))
+            var isMobile = IsMobileClient(httpContext);
+            var rawToken = await ReadRefreshTokenAsync(httpContext, isMobile, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(rawToken))
             {
                 var tokenHash = JwtTokenService.HashRefreshToken(rawToken);
                 var existing = await sessions.FindByTokenHashAsync(tokenHash, cancellationToken);
@@ -184,7 +191,8 @@ public static class AuthEndpoints
                     await sessions.RevokeSessionAsync(existing.UserId, existing.Id, cancellationToken);
             }
 
-            ClearRefreshCookie(httpContext);
+            if (!isMobile)
+                ClearRefreshCookie(httpContext);
             return Results.NoContent();
         })
         .WithName("Logout")
@@ -299,8 +307,42 @@ public static class AuthEndpoints
             ExpiresAtUtc: now.AddDays(tokens.RefreshTokenDays));
 
         await sessions.CreateAsync(session, cancellationToken);
+        if (IsMobileClient(httpContext))
+            return tokens.CreateToken(user, session.Id, rawRefreshToken);
+
         SetRefreshCookie(httpContext, rawRefreshToken, session.ExpiresAtUtc);
         return tokens.CreateToken(user, session.Id);
+    }
+
+    private static bool IsMobileClient(HttpContext httpContext) =>
+        string.Equals(httpContext.Request.Headers[ClientTypeHeader].ToString().Trim(), "mobile", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<string?> ReadRefreshTokenAsync(
+        HttpContext httpContext,
+        bool isMobile,
+        CancellationToken cancellationToken)
+    {
+        if (isMobile)
+        {
+            if (httpContext.Request.HasJsonContentType())
+            {
+                try
+                {
+                    var body = await httpContext.Request.ReadFromJsonAsync<RefreshTokenRequest>(cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(body?.RefreshToken))
+                        return body.RefreshToken.Trim();
+                }
+                catch (JsonException)
+                {
+                    // Corpo JSON inválido/vazio — ignora e tenta fallback.
+                }
+            }
+        }
+
+        return httpContext.Request.Cookies.TryGetValue(RefreshCookieName, out var cookieToken) &&
+            !string.IsNullOrWhiteSpace(cookieToken)
+            ? cookieToken
+            : null;
     }
 
     private static void SetRefreshCookie(HttpContext httpContext, string rawToken, DateTime expiresAtUtc)
